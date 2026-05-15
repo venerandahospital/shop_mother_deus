@@ -6,6 +6,7 @@ import '../models/unit.dart';
 import '../services/auth_service.dart';
 import '../services/item_image_upload_service.dart';
 import '../services/local_db_service.dart';
+import '../utils/meter_fixed_stock_items.dart';
 import '../widgets/section_page_title.dart';
 import 'barcode_scan_screen.dart';
 
@@ -1211,6 +1212,16 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
         : (double.tryParse(_restockToController.text.replaceAll(',', '.')) ??
             0);
 
+    final itemName = _nameController.text.trim();
+    var resolvedStock = stock;
+    if (isMeterSoldFixedStockItemName(itemName)) {
+      resolvedStock = isNewItem
+          ? kSpecialItemUnavailableStock
+          : (base!.stockQty > 0
+              ? kSpecialItemAvailableStock
+              : kSpecialItemUnavailableStock);
+    }
+
     final categoryValue = _composedCategoryValue();
     final enteredBarcodes =
         _aliasBarcodesExcludingPrimary(_barcodeController.text);
@@ -1322,10 +1333,12 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
       unitsPerPackage: null,
       costPrice: cost,
       sellingPrice: price,
-      stockQty: stock,
+      stockQty: resolvedStock,
       reorderLevel: reorder,
       restockTo: restockTo,
       createdAt: base?.createdAt,
+      specialRollMetersTotal: base?.specialRollMetersTotal ?? 0,
+      specialRollMetersSold: base?.specialRollMetersSold ?? 0,
     );
 
     if (await _authService.isRemoteUser()) {

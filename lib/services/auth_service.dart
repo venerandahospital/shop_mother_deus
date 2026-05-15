@@ -904,6 +904,14 @@ class AuthService {
     return _postRemoteAuthorized('/sales/delete', {'id': id});
   }
 
+  Future<(bool ok, String message)> applyRemoteSpecialItemSaleOutcomes(
+    List<Map<String, Object?>> updates,
+  ) async {
+    return _postRemoteAuthorized('/items/special-sale-outcomes', {
+      'updates': updates,
+    });
+  }
+
   Future<(bool ok, String message)> saveRemoteExpense({
     int? id,
     int? storeId,

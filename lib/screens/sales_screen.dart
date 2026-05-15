@@ -16,6 +16,7 @@ import '../utils/barcode_utils.dart';
 import '../utils/number_display.dart';
 import '../utils/text_format.dart';
 import '../utils/meter_fixed_stock_items.dart';
+import '../utils/special_item_sale_dialog.dart';
 import '../widgets/section_page_title.dart';
 import '../navigation/main_shell_tab_bus.dart';
 import 'sale_quantity_screen.dart';
@@ -160,9 +161,13 @@ class _SalesScreenState extends State<SalesScreen> {
   bool _isMeterFixedStockItem(Item item) =>
       isMeterSoldFixedStockItemName(item.name);
 
-  /// Service lines or fixed-stock items (Ekiveera, carpet, ebinyobwa): no cap from [Item.stockQty].
-  bool _lineIgnoresStockOnHand(Item item) =>
-      _isServiceSaleItem(item) || _isMeterFixedStockItem(item);
+  /// Service lines, or special items with stock 1: sell any quantity without
+  /// reducing stock at hand (stock is only 0 or 1 for those items).
+  bool _lineIgnoresStockOnHand(Item item) {
+    if (_isServiceSaleItem(item)) return true;
+    if (_isMeterFixedStockItem(item) && item.stockQty > 0) return true;
+    return false;
+  }
 
   String _saleCategoryLabel(Item item) {
     final raw = (item.category ?? '').trim();
@@ -175,7 +180,32 @@ class _SalesScreenState extends State<SalesScreen> {
     return toTitleCaseWords(raw);
   }
 
-  Future<void> _loadItems() async {
+  Item? _itemById(int? id) {
+    if (id == null) return null;
+    for (final item in _items) {
+      if (item.id == id) return item;
+    }
+    return null;
+  }
+
+  Item? _freshItem(Item? item) => item == null ? null : (_itemById(item.id) ?? item);
+
+  void _rebindCartToFreshItems() {
+    if (_cart.isEmpty) return;
+    for (var i = 0; i < _cart.length; i++) {
+      final e = _cart[i];
+      final fresh = _freshItem(e.item) ?? e.item;
+      if (!identical(fresh, e.item)) {
+        _cart[i] = _CartEntry(
+          item: fresh,
+          quantity: e.quantity,
+          productDiscount: e.productDiscount,
+        );
+      }
+    }
+  }
+
+  Future<(List<Item> items, Map<int, List<String>> aliases)> _fetchItemsFromSource() async {
     final isRemote = await _authService.isRemoteUser();
     final items = isRemote ? await _authService.fetchRemoteItems() : await _db.getItems();
     items.sort((a, b) => b.createdAt.compareTo(a.createdAt));
@@ -184,11 +214,32 @@ class _SalesScreenState extends State<SalesScreen> {
       final ids = items.map((e) => e.id).whereType<int>();
       aliases = await _db.getItemBarcodesMap(itemIds: ids);
     }
+    return (items, aliases);
+  }
+
+  /// Always read latest rows from DB (or remote API) before pick-list / barcode / checkout.
+  Future<bool> _refreshItemsFromDb() async {
+    final (items, aliases) = await _fetchItemsFromSource();
+    if (!mounted) return false;
+    setState(() {
+      _items = items;
+      _itemBarcodeAliases = aliases;
+      _selectedItem = _freshItem(_selectedItem);
+    });
+    return true;
+  }
+
+  Future<void> _loadItems({bool clearSelection = true}) async {
+    final (items, aliases) = await _fetchItemsFromSource();
     if (!mounted) return;
     setState(() {
       _items = items;
       _itemBarcodeAliases = aliases;
-      _selectedItem = null;
+      if (clearSelection) {
+        _selectedItem = null;
+      } else {
+        _selectedItem = _freshItem(_selectedItem);
+      }
     });
     _applyInitialDraftIfReady();
   }
@@ -650,7 +701,29 @@ class _SalesScreenState extends State<SalesScreen> {
 
   Future<void> _addToCart({double? forcedQty, double? forcedProductDiscount}) async {
     if (_selectedItem == null) return;
-    final selectedItem = _selectedItem!;
+    await _refreshItemsFromDb();
+    if (!mounted) return;
+    final selectedItem = _freshItem(_selectedItem);
+    if (selectedItem == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Item not found. Refresh and try again.')),
+      );
+      return;
+    }
+    if (_selectedItem!.id != selectedItem.id ||
+        _selectedItem!.stockQty != selectedItem.stockQty) {
+      setState(() => _selectedItem = selectedItem);
+    }
+    if (_isMeterFixedStockItem(selectedItem) && selectedItem.stockQty <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${toTitleCaseWords(selectedItem.name)} is out of stock. Receive a roll first.',
+          ),
+        ),
+      );
+      return;
+    }
     final skipStockCap = _lineIgnoresStockOnHand(selectedItem);
 
     final qty =
@@ -706,6 +779,62 @@ class _SalesScreenState extends State<SalesScreen> {
     });
   }
 
+  Future<void> _applySpecialLineOutcomeNow({
+    required int itemId,
+    required bool stillAvailable,
+    required double metersSold,
+    required bool isRemote,
+  }) async {
+    if (isRemote) {
+      final (ok, msg) = await _authService.applyRemoteSpecialItemSaleOutcomes([
+        {
+          'itemId': itemId,
+          'stillAvailable': stillAvailable,
+          'metersSold': metersSold,
+        },
+      ]);
+      if (!ok && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(msg)),
+        );
+      }
+    } else {
+      await _db.applySpecialItemSaleOutcome(
+        itemId: itemId,
+        stillAvailable: stillAvailable,
+        metersSold: metersSold,
+      );
+    }
+    if (mounted) {
+      await _refreshItemsFromDb();
+    }
+  }
+
+  Future<void> _confirmSpecialItemsAfterSale({
+    required List<_CartEntry> specialLines,
+    required bool isRemote,
+  }) async {
+    if (specialLines.isEmpty) return;
+
+    for (final entry in specialLines) {
+      final itemId = entry.item.id;
+      if (itemId == null) continue;
+      if (!mounted) return;
+      final stillAvailable = await showSpecialItemAvailabilityDialog(
+        context,
+        itemName: entry.item.name,
+      );
+      if (!mounted) return;
+
+      await _applySpecialLineOutcomeNow(
+        itemId: itemId,
+        stillAvailable: stillAvailable,
+        metersSold: entry.quantity,
+        isRemote: isRemote,
+      );
+    }
+  }
+
   Future<void> _saveSale() async {
     if (_cart.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -714,11 +843,28 @@ class _SalesScreenState extends State<SalesScreen> {
       return;
     }
 
+    if (!await _refreshItemsFromDb()) return;
+    if (!mounted) return;
+    setState(_rebindCartToFreshItems);
+
+    final specialLines =
+        _cart.where((e) => _isMeterFixedStockItem(e.item)).toList();
+
     // Validate stock before saving
     for (final entry in _cart) {
       if (entry.quantity <= 0) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Invalid quantity for ${toTitleCaseWords(entry.item.name)}')),
+        );
+        return;
+      }
+      if (_isMeterFixedStockItem(entry.item) && entry.item.stockQty <= 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${toTitleCaseWords(entry.item.name)} is out of stock. Receive stock first.',
+            ),
+          ),
         );
         return;
       }
@@ -896,6 +1042,12 @@ class _SalesScreenState extends State<SalesScreen> {
       saleId = await _db.createSale(sale, saleItems);
     }
 
+    await _confirmSpecialItemsAfterSale(
+      specialLines: specialLines,
+      isRemote: isRemote,
+    );
+    if (!mounted) return;
+
     if (_paymentMethod == _SalePaymentMethod.account &&
         amountReceived > 0 &&
         clientForSale?.id != null) {
@@ -951,9 +1103,7 @@ class _SalesScreenState extends State<SalesScreen> {
       _paymentMode = _PaymentMode.all;
       _paymentMethod = _SalePaymentMethod.cash;
     });
-    if (isRemote) {
-      await _loadItems();
-    }
+    await _loadItems(clearSelection: false);
     if (!mounted) return;
     await _showSaleReceiptPopup(
       saleId: saleId,
@@ -1023,7 +1173,6 @@ class _SalesScreenState extends State<SalesScreen> {
       );
       return;
     }
-    if (_items.isEmpty) return;
     final code = await Navigator.of(context).push<String>(
       MaterialPageRoute(builder: (_) => const BarcodeScanScreen()),
     );
@@ -1034,6 +1183,8 @@ class _SalesScreenState extends State<SalesScreen> {
   Future<void> _applyBarcodeToSale(String code) async {
     final trimmed = code.trim();
     if (trimmed.isEmpty) return;
+    if (!await _refreshItemsFromDb()) return;
+    if (!mounted) return;
     final matches = _itemsMatchingBarcode(trimmed);
     final usedPartialMatch = matches.isNotEmpty &&
         barcodeScanMatchKindForItem(
@@ -1045,7 +1196,18 @@ class _SalesScreenState extends State<SalesScreen> {
             ) ==
             BarcodeScanMatchKind.fuzzy;
     if (matches.length == 1) {
-      final item = matches.first;
+      final item = _freshItem(matches.first) ?? matches.first;
+      if (_isMeterFixedStockItem(item) && item.stockQty <= 0) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${toTitleCaseWords(item.name)} is out of stock. Receive a roll first.',
+            ),
+          ),
+        );
+        return;
+      }
       if (usedPartialMatch && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -1093,21 +1255,33 @@ class _SalesScreenState extends State<SalesScreen> {
   }
 
   Future<void> _openItemPage({String? initialSearchQuery}) async {
-    if (_items.isEmpty) return;
+    if (!await _refreshItemsFromDb()) return;
+    if (!mounted || _items.isEmpty) return;
     final result = await Navigator.of(context).push<Item>(
       MaterialPageRoute<Item>(
         builder: (context) => SaleItemScreen(
           items: _items,
           barcodeAliasesByItemId: _itemBarcodeAliases,
-          selectedItem: _selectedItem,
+          selectedItem: _freshItem(_selectedItem),
           currencySymbol: _currencySymbol,
           initialSearchQuery: initialSearchQuery,
         ),
       ),
     );
     if (!mounted || result == null) return;
+    final picked = _freshItem(result) ?? result;
+    if (_isMeterFixedStockItem(picked) && picked.stockQty <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${toTitleCaseWords(picked.name)} is out of stock. Receive stock first.',
+          ),
+        ),
+      );
+      return;
+    }
     setState(() {
-      _selectedItem = result;
+      _selectedItem = picked;
       if (_isAllReceived) {
         _amountReceivedController.text = _fmtCompactNumber(_liveTotal);
       }
@@ -1161,20 +1335,42 @@ class _SalesScreenState extends State<SalesScreen> {
 
   Future<void> _openQuantityPage() async {
     if (_selectedItem == null) return;
-    if (_isServiceSaleItem(_selectedItem!)) {
+    if (!await _refreshItemsFromDb()) return;
+    if (!mounted) return;
+    final item = _freshItem(_selectedItem);
+    if (item == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Item not found. Refresh and try again.')),
+      );
+      setState(() => _selectedItem = null);
+      return;
+    }
+    if (_isMeterFixedStockItem(item) && item.stockQty <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${toTitleCaseWords(item.name)} is out of stock. Receive stock first.',
+          ),
+        ),
+      );
+      setState(() => _selectedItem = item);
+      return;
+    }
+    setState(() => _selectedItem = item);
+    if (_isServiceSaleItem(item)) {
       await _addToCart(forcedQty: 1);
       return;
     }
     final currentQty = _cart
-        .where((e) => e.item.id == _selectedItem!.id)
+        .where((e) => e.item.id == item.id)
         .fold<double>(0, (sum, e) => sum + e.quantity);
-    final maxAvailable = _isMeterFixedStockItem(_selectedItem!)
+    final maxAvailable = _lineIgnoresStockOnHand(item)
         ? 1e12
-        : (_selectedItem!.stockQty - currentQty);
+        : (item.stockQty - currentQty);
     final result = await Navigator.of(context).push<Map<String, String>>(
       MaterialPageRoute<Map<String, String>>(
         builder: (context) => SaleQuantityScreen(
-          item: _selectedItem!,
+          item: item,
           cartTotal: _cartTotal,
           maxAvailable: maxAvailable,
           initialQuantity: _qtyController.text,
@@ -1197,14 +1393,18 @@ class _SalesScreenState extends State<SalesScreen> {
   }
 
   Future<void> _editCartEntry(int index) async {
+    if (!await _refreshItemsFromDb()) return;
+    if (!mounted) return;
+    setState(_rebindCartToFreshItems);
     final entry = _cart[index];
-    if (_isServiceSaleItem(entry.item)) {
+    final item = _freshItem(entry.item) ?? entry.item;
+    if (_isServiceSaleItem(item)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Service quantity is fixed to 1 per add.')),
       );
       return;
     }
-    final grossLineTotal = entry.item.sellingPrice * entry.quantity;
+    final grossLineTotal = item.sellingPrice * entry.quantity;
     final lineTotal =
         grossLineTotal - (entry.productDiscount > grossLineTotal ? grossLineTotal : entry.productDiscount);
     final baseCartTotal = _cartTotal - lineTotal;
@@ -1212,10 +1412,11 @@ class _SalesScreenState extends State<SalesScreen> {
     final result = await Navigator.of(context).push<Map<String, String>>(
       MaterialPageRoute<Map<String, String>>(
         builder: (context) => SaleQuantityScreen(
-          item: entry.item,
+          item: item,
           cartTotal: baseCartTotal,
-          maxAvailable:
-              _isMeterFixedStockItem(entry.item) ? 1e12 : entry.item.stockQty,
+          maxAvailable: _lineIgnoresStockOnHand(item)
+              ? 1e12
+              : item.stockQty,
           initialQuantity: _fmtCompactNumber(entry.quantity),
           initialProductDiscount:
               entry.productDiscount > 0 ? _fmtCompactNumber(entry.productDiscount) : '',
@@ -1234,7 +1435,7 @@ class _SalesScreenState extends State<SalesScreen> {
       return;
     }
     final stockCap =
-        _isMeterFixedStockItem(entry.item) ? 1e12 : entry.item.stockQty;
+        _lineIgnoresStockOnHand(item) ? 1e12 : item.stockQty;
     if (newQty > stockCap) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -1248,7 +1449,7 @@ class _SalesScreenState extends State<SalesScreen> {
 
     setState(() {
       _cart[index] = _CartEntry(
-        item: entry.item,
+        item: item,
         quantity: newQty,
         productDiscount: newProductDiscount,
       );

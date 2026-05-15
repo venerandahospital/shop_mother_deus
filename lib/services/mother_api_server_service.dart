@@ -6,6 +6,7 @@ import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../models/asset.dart';
 import '../models/client.dart';
 import '../models/expense.dart';
 import '../models/item.dart';
@@ -549,6 +550,36 @@ class MotherApiServerService {
             'data': await _itemsPayloadWithBarcodes(rows),
           });
         }
+      }
+      if (request.method == 'POST' &&
+          request.uri.path == '/items/special-sale-outcomes') {
+        final userId = await _requireApprovedRemoteUserOrRespond(request);
+        if (userId == null) return;
+        final body = await _readBody(request);
+        final updatesRaw = body['updates'];
+        if (updatesRaw is! List) {
+          return _sendJson(request, 400, {'message': 'Missing updates list'});
+        }
+        for (final row in updatesRaw) {
+          if (row is! Map) continue;
+          final map = row is Map<String, dynamic>
+              ? row
+              : Map<String, dynamic>.from(row);
+          final itemId = _asInt(map['itemId']);
+          if (itemId == null || itemId <= 0) continue;
+          final stillAvailable = map['stillAvailable'] == true;
+          final metersSold = _asDouble(map['metersSold']) ?? 0;
+          await LocalDbService.instance.applySpecialItemSaleOutcome(
+            itemId: itemId,
+            stillAvailable: stillAvailable,
+            metersSold: metersSold,
+          );
+        }
+        final rows = await LocalDbService.instance.getItems();
+        return _sendJson(request, 200, {
+          'message': 'Special item stock updated',
+          'data': await _itemsPayloadWithBarcodes(rows),
+        });
       }
       if (request.method == 'GET' && request.uri.path == '/items/transactions') {
         final userId = await _requireApprovedRemoteUserOrRespond(request);
@@ -1180,6 +1211,114 @@ class MotherApiServerService {
         return _sendJson(request, 200, {
           'message': deleted > 0 ? 'Expense deleted' : 'Expense not found',
           'data': rows.map((e) => e.toMap()).toList(),
+        });
+      }
+      if (request.uri.path == '/assets') {
+        final userId = await _requireApprovedRemoteUserOrRespond(request);
+        if (userId == null) return;
+        if (request.method == 'GET') {
+          final rows = await LocalDbService.instance.getAssets();
+          return _sendJson(request, 200, {
+            'data': rows.map((e) => e.toMap()).toList(),
+          });
+        }
+        if (request.method == 'POST' || request.method == 'PUT') {
+          final body = await _readBody(request);
+          final name = (body['name'] ?? '').toString().trim();
+          if (name.isEmpty) {
+            return _sendJson(request, 400, {'message': 'Asset name is required'});
+          }
+          final purchaseCost =
+              _asDouble(body['purchaseCost'] ?? body['purchase_cost']) ?? 0;
+          var currentValue =
+              _asDouble(body['currentValue'] ?? body['current_value']) ??
+                  purchaseCost;
+          if (currentValue < 0) currentValue = 0;
+          final purchaseDate = _asDate(
+                body['purchaseDate'] ?? body['purchase_date'],
+              ) ??
+              DateTime.now();
+          final asset = Asset(
+            id: _asInt(body['id']),
+            storeId: _asInt(body['storeId'] ?? body['store_id']),
+            name: name,
+            purchaseCost: purchaseCost < 0 ? 0 : purchaseCost,
+            currentValue: currentValue,
+            purchaseDate: purchaseDate,
+            notes: (body['notes'] ?? '').toString().trim().isEmpty
+                ? null
+                : (body['notes'] ?? '').toString().trim(),
+            createdAt:
+                _asDate(body['createdAt'] ?? body['created_at']) ?? DateTime.now(),
+            updatedAt:
+                _asDate(body['updatedAt'] ?? body['updated_at']) ?? DateTime.now(),
+          );
+          final id = await LocalDbService.instance.upsertAsset(asset);
+          final rows = await LocalDbService.instance.getAssets();
+          return _sendJson(request, 200, {
+            'message': 'Asset saved',
+            'id': id,
+            'data': rows.map((e) => e.toMap()).toList(),
+          });
+        }
+      }
+      if ((request.method == 'POST' || request.method == 'PUT') &&
+          request.uri.path == '/assets/delete') {
+        final userId = await _requireApprovedRemoteUserOrRespond(request);
+        if (userId == null) return;
+        final body = await _readBody(request);
+        final assetId = _asInt(body['id']);
+        if (assetId == null) {
+          return _sendJson(request, 400, {'message': 'Missing asset id'});
+        }
+        final deleted = await LocalDbService.instance.deleteAsset(assetId);
+        final rows = await LocalDbService.instance.getAssets();
+        return _sendJson(request, 200, {
+          'message': deleted > 0 ? 'Asset deleted' : 'Asset not found',
+          'data': rows.map((e) => e.toMap()).toList(),
+        });
+      }
+      if (request.method == 'GET' &&
+          request.uri.path == '/assets/depreciations') {
+        final userId = await _requireApprovedRemoteUserOrRespond(request);
+        if (userId == null) return;
+        final assetId = _asInt(
+          request.uri.queryParameters['assetId'] ??
+              request.uri.queryParameters['asset_id'],
+        );
+        if (assetId == null) {
+          return _sendJson(request, 400, {'message': 'Missing assetId'});
+        }
+        final rows =
+            await LocalDbService.instance.getAssetDepreciations(assetId);
+        return _sendJson(request, 200, {'data': rows});
+      }
+      if (request.method == 'POST' && request.uri.path == '/assets/depreciate') {
+        final userId = await _requireApprovedRemoteUserOrRespond(request);
+        if (userId == null) return;
+        final body = await _readBody(request);
+        final assetId = _asInt(body['assetId'] ?? body['asset_id']);
+        final amount = _asDouble(body['amount']);
+        if (assetId == null || amount == null || amount <= 0) {
+          return _sendJson(
+            request,
+            400,
+            {'message': 'Invalid depreciation payload'},
+          );
+        }
+        final noteRaw = (body['note'] ?? '').toString().trim();
+        await LocalDbService.instance.addAssetDepreciation(
+          assetId: assetId,
+          amount: amount,
+          note: noteRaw.isEmpty ? null : noteRaw,
+        );
+        final assets = await LocalDbService.instance.getAssets();
+        final history =
+            await LocalDbService.instance.getAssetDepreciations(assetId);
+        return _sendJson(request, 200, {
+          'message': 'Depreciation recorded',
+          'data': assets.map((e) => e.toMap()).toList(),
+          'depreciations': history,
         });
       }
       if ((request.method == 'POST' || request.method == 'PUT') &&

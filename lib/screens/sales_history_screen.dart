@@ -1179,21 +1179,6 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
                                               icon: const Icon(Icons.print_outlined, size: 18),
                                               onPressed: () => _printReceipt(receipt),
                                             ),
-                                            IconButton(
-                                              tooltip: 'Edit receipt',
-                                              visualDensity: VisualDensity.compact,
-                                              icon: const Icon(Icons.edit_outlined, size: 18),
-                                              onPressed: () {
-                                                Navigator.of(context).push(
-                                                  MaterialPageRoute(
-                                                    builder: (_) => SalesScreen(
-                                                      initialDraftPayload:
-                                                          _buildEditableDraftPayload(receipt),
-                                                    ),
-                                                  ),
-                                                );
-                                              },
-                                            ),
                                             PopupMenuButton<String>(
                                               tooltip: 'More',
                                               padding: EdgeInsets.zero,

@@ -6,10 +6,12 @@ import 'services/local_device_backup_service.dart';
 import 'services/low_stock_notification_service.dart';
 import 'services/mother_api_foreground_service.dart';
 import 'services/mother_api_server_service.dart';
+import 'services/special_items_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await AppSettingsService.instance.initialize();
+  await SpecialItemsService.instance.ensureLoaded();
   await LocalDeviceBackupService.instance.startPeriodicMotherBackup();
   await BackupService.instance.initialize();
   await MotherApiServerService.instance.start();
