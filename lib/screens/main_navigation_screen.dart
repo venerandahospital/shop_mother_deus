@@ -9,6 +9,7 @@ import '../widgets/bottom_nav.dart';
 import '../services/subscription_service.dart';
 import '../services/auth_service.dart';
 import '../navigation/app_router.dart';
+import '../navigation/main_shell_tab_bus.dart';
 
 class MainNavigationScreen extends StatefulWidget {
   final int initialIndex;
@@ -37,6 +38,22 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   void initState() {
     super.initState();
     _currentIndex = widget.initialIndex < 0 ? 0 : widget.initialIndex;
+    MainShellTabBus.instance.pendingIndex.addListener(_onShellTabRequested);
+  }
+
+  @override
+  void dispose() {
+    MainShellTabBus.instance.pendingIndex.removeListener(_onShellTabRequested);
+    super.dispose();
+  }
+
+  void _onShellTabRequested() {
+    final idx = MainShellTabBus.instance.pendingIndex.value;
+    if (idx == null || !mounted) return;
+    final max = _screens.length - 1;
+    final clamped = idx.clamp(0, max);
+    setState(() => _currentIndex = clamped);
+    MainShellTabBus.instance.clearPending();
   }
 
   Future<void> _onWillPop() async {

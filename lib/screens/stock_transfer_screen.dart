@@ -7,6 +7,7 @@ import '../services/local_db_service.dart';
 import '../utils/number_display.dart';
 import '../utils/text_format.dart';
 import '../widgets/section_page_title.dart';
+import 'item_search_pick_screen.dart';
 import 'stock_transfers_list_screen.dart';
 
 /// Prefer full unit name; fall back to short code only if name is missing.
@@ -116,6 +117,37 @@ class _StockTransferScreenState extends State<StockTransferScreen> {
     final all = _toCandidates;
     final used = _usedToItemIdsExceptLeg(legIndex);
     return all.where((e) => e.id == null || !used.contains(e.id)).toList();
+  }
+
+  String _itemPickerCaption(Item e) =>
+      '${toTitleCaseWords(e.name)}  •  AV ${formatDisplayNumber(e.stockQty)} ${_itemUnitDisplay(e)}';
+
+  Future<void> _pickFromItem() async {
+    if (_items.isEmpty) return;
+    final choice = await ItemSearchPickScreen.pick(
+      context,
+      title: 'From item (source)',
+      options: _items,
+      selected: _fromItem,
+    );
+    if (!mounted || choice == null) return;
+    setState(() => _fromItem = choice);
+    _syncLegsAfterFromItemChange();
+    _syncFromUnitCostField();
+  }
+
+  Future<void> _pickDestinationItem(int legIndex, _DestinationLeg leg) async {
+    final candidates = _candidatesForLeg(legIndex);
+    final choice = await ItemSearchPickScreen.pick(
+      context,
+      title: 'To item (destination)',
+      options: candidates,
+      selected: leg.toItem,
+    );
+    if (!mounted || choice == null) return;
+    setState(() => leg.toItem = choice);
+    _recomputeLegCost(leg);
+    _prefillLegSellingFromToItem(leg);
   }
 
   double _parseTotalSourceQty() =>
@@ -626,32 +658,26 @@ class _StockTransferScreenState extends State<StockTransferScreen> {
                       ),
                     ),
                     const SizedBox(height: 8),
-                    DropdownButtonFormField<Item>(
-                      initialValue: _fromItem,
+                    InputDecorator(
                       decoration: const InputDecoration(
                         labelText: 'From item (source)',
+                        contentPadding: EdgeInsets.zero,
                       ),
-                      isExpanded: true,
-                      items: _items
-                          .map(
-                            (e) => DropdownMenuItem<Item>(
-                              value: e,
-                              child: Text(
-                                '${toTitleCaseWords(e.name)}  •  AV ${formatDisplayNumber(e.stockQty)} ${_itemUnitDisplay(e)}',
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: (value) {
-                        if (value == null) return;
-                        setState(() {
-                          _fromItem = value;
-                        });
-                        _syncLegsAfterFromItemChange();
-                        _syncFromUnitCostField();
-                        setState(() {});
-                      },
+                      child: ListTile(
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 0,
+                        ),
+                        title: Text(
+                          _fromItem == null
+                              ? 'Tap to choose'
+                              : _itemPickerCaption(_fromItem!),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        trailing: const Icon(Icons.arrow_drop_down),
+                        onTap: _items.isEmpty ? null : _pickFromItem,
+                      ),
                     ),
                     const SizedBox(height: 6),
                     Text(
@@ -786,43 +812,35 @@ class _StockTransferScreenState extends State<StockTransferScreen> {
                                           ),
                                         ),
                                       ),
-                                    DropdownButtonFormField<Item>(
-                                      key: ValueKey(
-                                        'to_${index}_${leg.toItem?.id}',
-                                      ),
-                                      initialValue: leg.toItem != null &&
-                                              candidates.any(
-                                                (c) => c.id == leg.toItem!.id,
-                                              )
-                                          ? leg.toItem
-                                          : null,
+                                    InputDecorator(
                                       decoration: const InputDecoration(
                                         labelText: 'To item (destination)',
-                                        contentPadding: EdgeInsets.only(
-                                          top: 8,
-                                          bottom: 4,
-                                        ),
+                                        contentPadding: EdgeInsets.zero,
                                       ),
-                                      isExpanded: true,
-                                      items: candidates
-                                          .map(
-                                            (e) => DropdownMenuItem<Item>(
-                                              value: e,
-                                              child: Text(
-                                                '${toTitleCaseWords(e.name)}  •  AV ${formatDisplayNumber(e.stockQty)} ${_itemUnitDisplay(e)}',
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
-                                            ),
-                                          )
-                                          .toList(),
-                                      onChanged: (value) {
-                                        setState(() {
-                                          leg.toItem = value;
-                                        });
-                                        _recomputeLegCost(leg);
-                                        _prefillLegSellingFromToItem(leg);
-                                        setState(() {});
-                                      },
+                                      child: ListTile(
+                                        contentPadding:
+                                            const EdgeInsets.symmetric(
+                                          horizontal: 4,
+                                          vertical: 0,
+                                        ),
+                                        title: Text(
+                                          leg.toItem == null
+                                              ? 'Tap to choose'
+                                              : _itemPickerCaption(
+                                                  leg.toItem!,
+                                                ),
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        trailing:
+                                            const Icon(Icons.arrow_drop_down),
+                                        onTap: candidates.isEmpty
+                                            ? null
+                                            : () => _pickDestinationItem(
+                                                  index,
+                                                  leg,
+                                                ),
+                                      ),
                                     ),
                                     const SizedBox(height: 12),
                                     TextField(

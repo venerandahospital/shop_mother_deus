@@ -21,6 +21,7 @@ import '../models/service_transaction.dart';
 import '../models/asset.dart';
 import '../models/loan.dart';
 import '../models/cart_draft.dart';
+import '../utils/meter_fixed_stock_items.dart';
 
 class LocalDbService {
   LocalDbService._();
@@ -1458,19 +1459,48 @@ class LocalDbService {
 
   Future<int> upsertItem(Item item) async {
     final db = await database;
-    int result;
-    if (item.id == null) {
-      result = await db.insert('items', item.toMap());
-    } else {
-      result = await db.update(
-        'items',
-        item.toMap(),
-        where: 'id = ?',
-        whereArgs: [item.id],
-      );
+    final itemToSave = isMeterSoldFixedStockItemName(item.name)
+        ? item.copyWith(stockQty: kMeterFixedDisplayStockQty)
+        : item;
+    if (itemToSave.id == null) {
+      final id = await db.transaction<int>((txn) async {
+        var toInsert = itemToSave;
+        final skuEmpty = (toInsert.sku ?? '').trim().isEmpty;
+        final bcEmpty = (toInsert.barcode ?? '').trim().isEmpty;
+        if (skuEmpty && bcEmpty) {
+          final gen = await _generateNextInternalSkuForExecutor(txn);
+          toInsert = toInsert.copyWith(sku: gen, barcode: gen);
+        } else if (!skuEmpty && bcEmpty) {
+          toInsert = toInsert.copyWith(barcode: toInsert.sku);
+        } else if (skuEmpty && !bcEmpty) {
+          toInsert = toInsert.copyWith(sku: toInsert.barcode);
+        }
+        return txn.insert('items', toInsert.toMap());
+      });
+      _notifyDataChanged();
+      return id;
     }
+    final result = await db.update(
+      'items',
+      itemToSave.toMap(),
+      where: 'id = ?',
+      whereArgs: [itemToSave.id],
+    );
     _notifyDataChanged();
     return result;
+  }
+
+  Future<Item?> getItemById(int id) async {
+    if (id <= 0) return null;
+    final db = await database;
+    final rows = await db.query(
+      'items',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return Item.fromMap(Map<String, dynamic>.from(rows.first));
   }
 
   String _normalizeCode(String? raw) => (raw ?? '').trim().toLowerCase();
@@ -1489,7 +1519,11 @@ class LocalDbService {
 
   Future<String> generateNextInternalSku() async {
     final db = await database;
-    final rows = await db.query('items', columns: ['sku', 'barcode']);
+    return _generateNextInternalSkuForExecutor(db);
+  }
+
+  Future<String> _generateNextInternalSkuForExecutor(DatabaseExecutor exec) async {
+    final rows = await exec.query('items', columns: ['sku', 'barcode']);
     final taken = <String>{};
     final pattern = RegExp(r'^ITM(\d{6})$');
     var next = 1;
@@ -1796,6 +1830,14 @@ class LocalDbService {
     );
     if (rows.isEmpty) return 0;
     final item = Item.fromMap(rows.first);
+    if (isMeterSoldFixedStockItemName(item.name)) {
+      return await db.update(
+        'items',
+        item.copyWith(stockQty: kMeterFixedDisplayStockQty).toMap(),
+        where: 'id = ?',
+        whereArgs: [itemId],
+      );
+    }
     final newQty = item.stockQty + delta;
     if (newQty < 0) return 0;
     final result = await db.update(
@@ -1842,7 +1884,10 @@ class LocalDbService {
       whereArgs: storeId != null ? [storeId] : null,
       orderBy: 'name COLLATE NOCASE ASC',
     );
-    return maps.map(Item.fromMap).toList();
+    return maps
+        .map(Item.fromMap)
+        .where((e) => !isMeterSoldFixedStockItemName(e.name))
+        .toList();
   }
 
   // ===== PRODUCT CATEGORIES =====
@@ -2114,8 +2159,10 @@ class LocalDbService {
       if (maps.isEmpty) return 0;
 
       final item = Item.fromMap(maps.first);
+      final fixedStock = isMeterSoldFixedStockItemName(item.name);
       final oldQty = item.stockQty;
-      final newQty = oldQty + quantity;
+      final newQty =
+          fixedStock ? kMeterFixedDisplayStockQty : oldQty + quantity;
 
       final receipt = StockReceipt(
         storeId: storeId ?? item.storeId,
@@ -2189,6 +2236,12 @@ class LocalDbService {
 
       final fromItem = Item.fromMap(fromRows.first);
       final toItem = Item.fromMap(toRows.first);
+      if (isMeterSoldFixedStockItemName(fromItem.name) ||
+          isMeterSoldFixedStockItemName(toItem.name)) {
+        throw ArgumentError(
+          'Transfers are not supported for fixed-stock items (Ekiveera, carpet, ebinyobwa).',
+        );
+      }
       final oldFromQty = fromItem.stockQty;
       final oldToQty = toItem.stockQty;
       if (oldFromQty < fromQuantity) {
@@ -2274,6 +2327,12 @@ class LocalDbService {
 
       final fromItem = Item.fromMap(fromRows.first);
       final toItem = Item.fromMap(toRows.first);
+      if (isMeterSoldFixedStockItemName(fromItem.name) ||
+          isMeterSoldFixedStockItemName(toItem.name)) {
+        throw ArgumentError(
+          'Transfers are not supported for fixed-stock items (Ekiveera, carpet, ebinyobwa).',
+        );
+      }
       final oldFromQty = fromItem.stockQty;
       final oldToQty = toItem.stockQty;
       final newToQty = oldToQty + toQuantity;
@@ -2402,13 +2461,18 @@ class LocalDbService {
         throw StateError('Item not found.');
       }
       final item = Item.fromMap(itemRows.first);
-      if (item.stockQty <= receipt.quantity) {
+      final fixedMeter = isMeterSoldFixedStockItemName(item.name);
+      if (!fixedMeter && item.stockQty <= receipt.quantity) {
         throw StateError(
           'Cannot edit this receive. Current stock must be greater than received quantity.',
         );
       }
-      final baseQty = item.stockQty - receipt.quantity;
-      final nextQty = baseQty + quantity;
+      final baseQty = fixedMeter
+          ? kMeterFixedDisplayStockQty
+          : (item.stockQty - receipt.quantity);
+      final nextQty = fixedMeter
+          ? kMeterFixedDisplayStockQty
+          : (baseQty + quantity);
       await txn.update(
         'stock_receipts',
         {
@@ -2468,18 +2532,27 @@ class LocalDbService {
         throw StateError('Item not found.');
       }
       final item = Item.fromMap(itemRows.first);
-      final nextQty = item.stockQty - receipt.quantity;
-      if (nextQty < 0) {
-        throw StateError(
-          'Cannot delete this record. Not enough stock at hand to reverse it.',
-        );
-      }
+      final fixedMeter = isMeterSoldFixedStockItemName(item.name);
       final deleted = await txn.delete(
         'stock_receipts',
         where: 'id = ?',
         whereArgs: [receiptId],
       );
       if (deleted == 0) return 0;
+      if (fixedMeter) {
+        return txn.update(
+          'items',
+          item.copyWith(stockQty: kMeterFixedDisplayStockQty).toMap(),
+          where: 'id = ?',
+          whereArgs: [receipt.itemId],
+        );
+      }
+      final nextQty = item.stockQty - receipt.quantity;
+      if (nextQty < 0) {
+        throw StateError(
+          'Cannot delete this record. Not enough stock at hand to reverse it.',
+        );
+      }
       return txn.update(
         'items',
         item.copyWith(stockQty: nextQty).toMap(),
@@ -2525,10 +2598,16 @@ class LocalDbService {
         );
         if (itemRows.isNotEmpty) {
           final existing = Item.fromMap(itemRows.first);
-          if (_isServiceSaleCategory(existing.category)) {
+          if (_isServiceSaleCategory(existing.category) ||
+              isMeterSoldFixedStockItemName(existing.name)) {
             continue;
           }
           final newQty = existing.stockQty - item.quantity;
+          if (newQty < -0.0001) {
+            throw StateError(
+              'Not enough stock for this item. Available: ${existing.stockQty}.',
+            );
+          }
           await txn.update(
             'items',
             existing.copyWith(stockQty: newQty).toMap(),
@@ -2677,7 +2756,10 @@ class LocalDbService {
         );
         if (itemRows.isEmpty) continue;
         final item = Item.fromMap(itemRows.first);
-        if (_isServiceSaleCategory(item.category)) continue;
+        if (_isServiceSaleCategory(item.category) ||
+            isMeterSoldFixedStockItemName(item.name)) {
+          continue;
+        }
         final newQty = item.stockQty + si.quantity;
         await txn.update(
           'items',
@@ -3228,15 +3310,8 @@ class LocalDbService {
   }
 
   Future<int> getReorderCount({int? storeId}) async {
-    final db = await database;
-    final result = await db.rawQuery('''
-      SELECT COUNT(*) as count
-      FROM items
-      WHERE (stock_qty <= reorder_level OR stock_qty <= 0)
-      ${storeId != null ? 'AND store_id = ?' : ''}
-      ''', storeId != null ? [storeId] : []);
-    final value = result.first['count'] as int?;
-    return value ?? 0;
+    final items = await getReorderItems(storeId: storeId);
+    return items.length;
   }
 
   // ===== LOANS =====

@@ -90,7 +90,6 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
     _loadUnits();
     _loadRecentImageUrls();
     _loadAcceptedBarcodes();
-    _ensurePrimaryCodeVisible();
   }
 
   void _onNameChanged() {
@@ -117,11 +116,14 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
       );
       return;
     }
+    if (_isEditingItem && _isPrimaryCodeOfThisItem(trimmed)) {
+      return;
+    }
 
     final existingItems = await _loadItemsForBarcodeChecks();
     final conflictInLoaded = existingItems.firstWhere(
       (item) =>
-          item.id != widget.item?.id &&
+          !_isSameItemRecord(item, widget.item) &&
           (_norm(item.sku) == normalized || _norm(item.barcode) == normalized),
       orElse: () => Item(name: ''),
     );
@@ -224,10 +226,13 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
     final aliases = await _db.getItemBarcodes(itemId);
     if (!mounted) return;
     if (aliases.isEmpty) return;
-    final allCodes = _db.normalizeBarcodeList([
-      (_barcodeController.text).trim(),
-      ...aliases,
-    ]);
+    final allCodes = _db
+        .normalizeBarcodeList([
+          (_barcodeController.text).trim(),
+          ...aliases,
+        ])
+        .where((c) => !_isPrimaryCodeOfThisItem(c))
+        .toList();
     setState(() {
       _barcodeController.text = allCodes.join(', ');
     });
@@ -240,40 +245,18 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
     return _db.getItems();
   }
 
-  Future<void> _ensurePrimaryCodeVisible() async {
-    final existing = _skuController.text.trim();
-    if (existing.isNotEmpty) return;
-    final generated = await _generateNextPrimaryCodeFromItems();
-    if (!mounted) return;
-    setState(() => _skuController.text = generated);
-  }
-
-  Future<String> _generateNextPrimaryCodeFromItems() async {
-    final items = await _loadItemsForBarcodeChecks();
-    final taken = <String>{};
-    const prefix = 'ITM';
-    final pattern = RegExp(r'^ITM(\d{6})$');
-    var next = 1;
-    for (final item in items) {
-      if (item.id == widget.item?.id) continue;
-      final sku = (item.sku ?? '').trim().toUpperCase();
-      final barcode = (item.barcode ?? '').trim().toUpperCase();
-      if (sku.isNotEmpty) taken.add(sku);
-      if (barcode.isNotEmpty) taken.add(barcode);
-      final skuMatch = pattern.firstMatch(sku);
-      final skuNumber = int.tryParse(skuMatch?.group(1) ?? '');
-      if (skuNumber != null && skuNumber >= next) next = skuNumber + 1;
-      final barcodeMatch = pattern.firstMatch(barcode);
-      final barcodeNumber = int.tryParse(barcodeMatch?.group(1) ?? '');
-      if (barcodeNumber != null && barcodeNumber >= next) {
-        next = barcodeNumber + 1;
-      }
-    }
-    while (true) {
-      final candidate = '$prefix${next.toString().padLeft(6, '0')}';
-      if (!taken.contains(candidate)) return candidate;
-      next++;
-    }
+  Future<void> _applyItemAliasBarcodes(
+    int itemId,
+    String? primarySku,
+    List<String> rawAcceptedBarcodes,
+  ) async {
+    if (itemId <= 0) return;
+    final p = (primarySku ?? '').trim();
+    final filtered = _db
+        .normalizeBarcodeList(rawAcceptedBarcodes)
+        .where((code) => p.isEmpty || _norm(code) != _norm(p))
+        .toList();
+    await _db.replaceItemBarcodes(itemId: itemId, barcodes: filtered);
   }
 
   Future<void> _loadUnits() async {
@@ -490,6 +473,34 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
   }
 
   String _norm(String? value) => (value ?? '').trim().toLowerCase();
+
+  bool get _isEditingItem => widget.item?.id != null;
+
+  String? get _existingPrimaryCode {
+    final base = widget.item;
+    if (base == null) return null;
+    final sku = (base.sku ?? '').trim();
+    if (sku.isNotEmpty) return sku;
+    final barcode = (base.barcode ?? '').trim();
+    return barcode.isEmpty ? null : barcode;
+  }
+
+  bool _isSameItemRecord(Item other, Item? base) {
+    if (base?.id == null || other.id == null) return false;
+    return other.id == base!.id;
+  }
+
+  bool _isPrimaryCodeOfThisItem(String code) {
+    final primary = _existingPrimaryCode;
+    if (primary == null || primary.isEmpty) return false;
+    return _norm(code) == _norm(primary);
+  }
+
+  List<String> _aliasBarcodesExcludingPrimary(String raw) {
+    return _parseAcceptedBarcodes(raw)
+        .where((c) => !_isPrimaryCodeOfThisItem(c))
+        .toList();
+  }
 
   bool get _isServiceSaleCategory => _norm(_selectedSaleCategory) == 'service';
 
@@ -1201,23 +1212,28 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
             0);
 
     final categoryValue = _composedCategoryValue();
-    final enteredBarcodes = _parseAcceptedBarcodes(_barcodeController.text);
-    final enteredSku = _skuController.text.trim();
+    final enteredBarcodes =
+        _aliasBarcodesExcludingPrimary(_barcodeController.text);
+    final enteredSku =
+        _isEditingItem ? '' : _skuController.text.trim();
     final shelfNumber = _shelfNumberController.text.trim();
 
     List<Item> existingItems = const [];
     existingItems = await _loadItemsForBarcodeChecks();
-    final allCodesToValidate = [
-      if (enteredSku.isNotEmpty) enteredSku,
-      ...enteredBarcodes,
-    ];
+    final allCodesToValidate = _isEditingItem
+        ? enteredBarcodes
+        : [
+            if (enteredSku.isNotEmpty) enteredSku,
+            ...enteredBarcodes,
+          ];
     String? conflictingCode;
     for (final code in allCodesToValidate) {
       final normalized = _norm(code);
       if (normalized.isEmpty) continue;
+      if (_isEditingItem && _isPrimaryCodeOfThisItem(code)) continue;
       final usedByOtherItem = existingItems.any(
         (e) =>
-            e.id != base?.id &&
+            !_isSameItemRecord(e, base) &&
             (_norm(e.sku) == normalized || _norm(e.barcode) == normalized),
       );
       if (usedByOtherItem) {
@@ -1242,14 +1258,22 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
       return;
     }
 
-    final resolvedSku = enteredSku.isEmpty
-        ? await _db.generateNextInternalSku()
-        : enteredSku;
-    final primaryBarcode = resolvedSku;
-    final aliasBarcodes = _db
-        .normalizeBarcodeList(enteredBarcodes)
-        .where((code) => _norm(code) != _norm(resolvedSku))
-        .toList();
+    final String? resolvedSku = _isEditingItem
+        ? _existingPrimaryCode
+        : (enteredSku.isNotEmpty
+            ? enteredSku
+            : null);
+
+    String? primaryBarcode;
+    if (resolvedSku != null && resolvedSku.isNotEmpty) {
+      primaryBarcode = resolvedSku;
+    } else if (base != null) {
+      final b = (base.barcode ?? '').trim();
+      final s = (base.sku ?? '').trim();
+      primaryBarcode = b.isNotEmpty ? b : (s.isNotEmpty ? s : null);
+    } else {
+      primaryBarcode = null;
+    }
 
     // For new items: block only exact duplicates of name + unit + sale + business.
     if (base == null) {
@@ -1305,12 +1329,10 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
     );
 
     if (await _authService.isRemoteUser()) {
-      final remote = await _authService.saveRemoteItem({
+      final payload = <String, Object?>{
         if (newItem.id != null) 'id': newItem.id,
         if (newItem.storeId != null) 'storeId': newItem.storeId,
         'name': newItem.name,
-        'barcode': newItem.barcode ?? '',
-        'sku': newItem.sku ?? '',
         'category': newItem.category ?? '',
         'unit': newItem.unit ?? '',
         'unitShort': newItem.unitShort ?? '',
@@ -1327,7 +1349,12 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
         'stockQty': newItem.stockQty,
         'reorderLevel': newItem.reorderLevel,
         'restockTo': newItem.restockTo,
-      });
+      };
+      if ((newItem.sku ?? '').trim().isNotEmpty) {
+        payload['sku'] = newItem.sku!.trim();
+        payload['barcode'] = (newItem.barcode ?? newItem.sku)!.trim();
+      }
+      final remote = await _authService.saveRemoteItem(payload);
       if (!remote.$1) {
         if (!mounted) return;
         setState(() => _saving = false);
@@ -1336,18 +1363,36 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
         );
         return;
       }
+      final mergedId = remote.$3 ?? newItem.id ?? base?.id;
+      Item? merged;
+      if (mergedId != null && mergedId > 0) {
+        final list = await _authService.fetchRemoteItems();
+        for (final it in list) {
+          if (it.id == mergedId) {
+            merged = it;
+            break;
+          }
+        }
+      }
+      if (merged != null) {
+        await _db.upsertItem(merged);
+        await _applyItemAliasBarcodes(merged.id!, merged.sku, enteredBarcodes);
+      }
+      if (!mounted) return;
+      setState(() => _saving = false);
+      Navigator.of(context).pop(true);
+      return;
     }
 
     final persistedItemId = base?.id ?? (await _db.upsertItem(newItem));
     if (base != null) {
       await _db.upsertItem(newItem);
     }
-    if (persistedItemId > 0) {
-      await _db.replaceItemBarcodes(
-        itemId: persistedItemId,
-        barcodes: aliasBarcodes,
-      );
-    }
+    final idForAliases = base?.id ?? persistedItemId;
+    final savedPrimary = idForAliases > 0
+        ? ((await _db.getItemById(idForAliases))?.sku ?? resolvedSku)
+        : resolvedSku;
+    await _applyItemAliasBarcodes(idForAliases, savedPrimary, enteredBarcodes);
 
     if (!mounted) return;
     setState(() {
@@ -1545,10 +1590,11 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
                     child: TextFormField(
                       controller: _barcodeController,
                       readOnly: true,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Accepted barcodes (optional)',
-                        helperText:
-                            'Scan repeatedly to add many codes. Primary code is your auto-generated SKU.',
+                        helperText: _isEditingItem
+                            ? 'Scan or add extra barcodes for this item.'
+                            : 'Scan repeatedly to add many codes. Primary ITM code is assigned on first save.',
                       ),
                     ),
                   ),
@@ -1585,17 +1631,19 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
                   }).toList(),
                 ),
               ],
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _skuController,
-                readOnly: true,
-                keyboardType: TextInputType.text,
-                decoration: const InputDecoration(
-                  labelText: 'Primary code (auto-generated)',
-                  helperText:
-                      'This is the fixed primary code for the item.',
+              if (!_isEditingItem) ...[
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _skuController,
+                  readOnly: true,
+                  keyboardType: TextInputType.text,
+                  decoration: const InputDecoration(
+                    labelText: 'Primary code (auto-generated)',
+                    helperText:
+                        'Leave blank for a new item: the next ITM code is assigned on first save only.',
+                  ),
                 ),
-              ),
+              ],
               const SizedBox(height: 12),
               TextFormField(
                 controller: _shelfNumberController,

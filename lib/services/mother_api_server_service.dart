@@ -401,7 +401,7 @@ class MotherApiServerService {
         if (request.method == 'GET') {
           final rows = await LocalDbService.instance.getItems();
           return _sendJson(request, 200, {
-            'data': rows.map((e) => e.toMap()).toList(),
+            'data': await _itemsPayloadWithBarcodes(rows),
           });
         }
         if (request.method == 'POST' || request.method == 'PUT') {
@@ -430,52 +430,123 @@ class MotherApiServerService {
             body['reorderLevel'] ?? body['reorder_level'],
           );
           final restockToRaw = _asDouble(body['restockTo'] ?? body['restock_to']);
+          final skuRaw = (body['sku'] ?? '').toString().trim();
+          final barcodeRaw = (body['barcode'] ?? '').toString().trim();
+          String? sku = skuRaw.isEmpty ? null : skuRaw;
+          String? barcode = barcodeRaw.isEmpty ? null : barcodeRaw;
+          if (incomingId != null && existingItem != null) {
+            if (sku == null || sku.isEmpty) {
+              sku = (existingItem.sku ?? '').trim().isEmpty
+                  ? null
+                  : existingItem.sku!.trim();
+            }
+            if (barcode == null || barcode.isEmpty) {
+              barcode = (existingItem.barcode ?? '').trim().isEmpty
+                  ? null
+                  : existingItem.barcode!.trim();
+            }
+          } else if (incomingId == null) {
+            if ((sku == null || sku.isEmpty) &&
+                (barcode == null || barcode.isEmpty)) {
+              sku = null;
+              barcode = null;
+            } else {
+              if (sku != null &&
+                  sku.isNotEmpty &&
+                  (barcode == null || barcode.isEmpty)) {
+                barcode = sku;
+              }
+              if (barcode != null &&
+                  barcode.isNotEmpty &&
+                  (sku == null || sku.isEmpty)) {
+                sku = barcode;
+              }
+            }
+          }
           final item = Item(
             id: incomingId,
-            storeId: _asInt(body['storeId']),
+            storeId:
+                _asInt(body['storeId'] ?? body['store_id']) ?? existingItem?.storeId,
             name: name,
-            sku: (body['sku'] ?? '').toString().trim().isEmpty
-                ? null
-                : (body['sku'] ?? '').toString().trim(),
-            barcode: (body['barcode'] ?? '').toString().trim().isEmpty
-                ? null
-                : (body['barcode'] ?? '').toString().trim(),
-            category: (body['category'] ?? '').toString().trim().isEmpty
-                ? null
-                : (body['category'] ?? '').toString().trim(),
-            unit: (body['unit'] ?? '').toString().trim().isEmpty
-                ? null
-                : (body['unit'] ?? '').toString().trim(),
-            unitShort: (body['unitShort'] ?? '').toString().trim().isEmpty
-                ? null
-                : (body['unitShort'] ?? '').toString().trim(),
-            imageUrl: (body['imageUrl'] ?? '').toString().trim().isEmpty
-                ? null
-                : (body['imageUrl'] ?? '').toString().trim(),
-            imageUrl2: (body['imageUrl2'] ?? '').toString().trim().isEmpty
-                ? null
-                : (body['imageUrl2'] ?? '').toString().trim(),
-            imageUrl3: (body['imageUrl3'] ?? '').toString().trim().isEmpty
-                ? null
-                : (body['imageUrl3'] ?? '').toString().trim(),
-            packagingId: _asInt(body['packagingId']),
-            variantGroup: (body['variantGroup'] ?? '').toString().trim().isEmpty
-                ? null
-                : (body['variantGroup'] ?? '').toString().trim(),
+            sku: sku,
+            barcode: barcode,
+            category: _resolveOptionalStringField(
+              body,
+              camel: 'category',
+              snake: 'category',
+              existing: existingItem?.category,
+            ),
+            unit: _resolveOptionalStringField(
+              body,
+              camel: 'unit',
+              snake: 'unit',
+              existing: existingItem?.unit,
+            ),
+            unitShort: _resolveOptionalStringField(
+              body,
+              camel: 'unitShort',
+              snake: 'unit_short',
+              existing: existingItem?.unitShort,
+            ),
+            shelfNumber: _resolveOptionalStringField(
+              body,
+              camel: 'shelfNumber',
+              snake: 'shelf_number',
+              existing: existingItem?.shelfNumber,
+            ),
+            imageUrl: _resolveOptionalStringField(
+              body,
+              camel: 'imageUrl',
+              snake: 'image_url',
+              existing: existingItem?.imageUrl,
+            ),
+            imageUrl2: _resolveOptionalStringField(
+              body,
+              camel: 'imageUrl2',
+              snake: 'image_url_2',
+              existing: existingItem?.imageUrl2,
+            ),
+            imageUrl3: _resolveOptionalStringField(
+              body,
+              camel: 'imageUrl3',
+              snake: 'image_url_3',
+              existing: existingItem?.imageUrl3,
+            ),
+            packagingId:
+                _asInt(body['packagingId'] ?? body['packaging_id']) ??
+                existingItem?.packagingId,
+            variantGroup: _resolveOptionalStringField(
+              body,
+              camel: 'variantGroup',
+              snake: 'variant_group',
+              existing: existingItem?.variantGroup,
+            ),
             unitsPerPackage:
-                _asDouble(body['unitsPerPackage'] ?? body['units_per_package']),
+                _asDouble(body['unitsPerPackage'] ?? body['units_per_package']) ??
+                existingItem?.unitsPerPackage,
             costPrice: costPriceRaw ?? existingItem?.costPrice ?? 0,
             sellingPrice: sellingPriceRaw ?? existingItem?.sellingPrice ?? 0,
             stockQty: stockQtyRaw ?? existingItem?.stockQty ?? 0,
             reorderLevel: reorderLevelRaw ?? existingItem?.reorderLevel ?? 0,
             restockTo: restockToRaw ?? existingItem?.restockTo ?? 0,
+            createdAt: existingItem?.createdAt,
           );
           final id = await LocalDbService.instance.upsertItem(item);
+          final persistedId = incomingId ?? item.id ?? (id > 0 ? id : null);
+          if (persistedId != null && persistedId > 0) {
+            if (_bodyHasKey(body, 'acceptedBarcodes', 'accepted_barcodes')) {
+              final accepted = _parseAcceptedBarcodesList(body);
+              await LocalDbService.instance.replaceItemBarcodes(
+                itemId: persistedId,
+                barcodes: accepted,
+              );
+            }
+          }
           final rows = await LocalDbService.instance.getItems();
           return _sendJson(request, 200, {
             'message': 'Item saved',
-            'id': id,
-            'data': rows.map((e) => e.toMap()).toList(),
+            'id': persistedId ?? id,
+            'data': await _itemsPayloadWithBarcodes(rows),
           });
         }
       }
@@ -784,8 +855,12 @@ class MotherApiServerService {
               : (body['customerAddress'] ?? '').toString().trim(),
           paymentMethod: paymentMethod,
         );
-        final saleId = await LocalDbService.instance.createSale(sale, saleItems);
-        return _sendJson(request, 201, {'message': 'Sale saved', 'saleId': saleId});
+        try {
+          final saleId = await LocalDbService.instance.createSale(sale, saleItems);
+          return _sendJson(request, 201, {'message': 'Sale saved', 'saleId': saleId});
+        } catch (e) {
+          return _sendJson(request, 400, {'message': e.toString()});
+        }
       }
       if ((request.method == 'POST' || request.method == 'PUT') &&
           request.uri.path == '/sales/delete') {
@@ -1376,6 +1451,51 @@ class MotherApiServerService {
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
     final rand = Random.secure();
     return List.generate(32, (_) => chars[rand.nextInt(chars.length)]).join();
+  }
+
+  bool _bodyHasKey(Map<dynamic, dynamic> body, String camel, String snake) =>
+      body.containsKey(camel) || body.containsKey(snake);
+
+  String? _readOptionalStringFromBody(Map<dynamic, dynamic> body, String camel, String snake) {
+    final raw = body[camel] ?? body[snake];
+    if (raw == null) return null;
+    final trimmed = raw.toString().trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  String? _resolveOptionalStringField(
+    Map<dynamic, dynamic> body, {
+    required String camel,
+    required String snake,
+    String? existing,
+  }) {
+    if (_bodyHasKey(body, camel, snake)) {
+      return _readOptionalStringFromBody(body, camel, snake);
+    }
+    return existing;
+  }
+
+  List<String> _parseAcceptedBarcodesList(Map<String, dynamic> body) {
+    final raw = body['accepted_barcodes'] ?? body['acceptedBarcodes'];
+    if (raw is! List) return const [];
+    return LocalDbService.instance.normalizeBarcodeList(
+      raw.map((e) => e.toString()).where((s) => s.trim().isNotEmpty),
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> _itemsPayloadWithBarcodes(
+    List<Item> rows,
+  ) async {
+    final aliasMap = await LocalDbService.instance.getItemBarcodesMap();
+    return [
+      for (final e in rows)
+        {
+          ...e.toMap(),
+          'accepted_barcodes': e.id != null
+              ? (aliasMap[e.id!] ?? const <String>[])
+              : const <String>[],
+        },
+    ];
   }
 
   int? _asInt(Object? value) {

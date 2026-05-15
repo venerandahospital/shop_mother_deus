@@ -641,7 +641,7 @@ class AuthService {
         'email': normalizedEmail,
         'profilePic': (profilePic ?? '').trim(),
       });
-      if (!response.$1) return response;
+      if (!response.$1) return (response.$1, response.$2);
       await prefs.setString(_usernameKey, trimmedName);
       await prefs.setString(_userEmailKey, normalizedEmail);
       if (profilePic != null) {
@@ -788,8 +788,21 @@ class AuthService {
     });
   }
 
-  Future<(bool ok, String message)> saveRemoteItem(Map<String, Object?> payload) async {
-    return _postRemoteAuthorized('/items', payload);
+  Future<(bool ok, String message, int? itemId)> saveRemoteItem(
+    Map<String, Object?> payload,
+  ) async {
+    final (ok, msg, data) = await _postRemoteAuthorizedFull('/items', payload);
+    if (!ok || data == null) return (ok, msg, null);
+    final rawId = data['id'];
+    int? parsed;
+    if (rawId is int) {
+      parsed = rawId;
+    } else if (rawId is num) {
+      parsed = rawId.toInt();
+    } else {
+      parsed = int.tryParse(rawId?.toString() ?? '');
+    }
+    return (ok, msg, parsed);
   }
 
   Future<(bool ok, String message)> deleteRemoteItem(int id) async {
@@ -870,8 +883,21 @@ class AuthService {
     return _postRemoteAuthorized('/stock/transfers', payload);
   }
 
-  Future<(bool ok, String message)> createRemoteSale(Map<String, Object?> payload) async {
-    return _postRemoteAuthorized('/sales', payload);
+  /// Persists the sale on the mother device only. [saleId] is set when the server returns it (HTTP 2xx).
+  Future<(bool ok, String message, int? saleId)> createRemoteSale(
+    Map<String, Object?> payload,
+  ) async {
+    final (ok, msg, data) = await _postRemoteAuthorizedFull('/sales', payload);
+    int? saleId;
+    if (ok && data != null) {
+      final raw = data['saleId'];
+      if (raw is int) {
+        saleId = raw;
+      } else if (raw != null) {
+        saleId = int.tryParse(raw.toString());
+      }
+    }
+    return (ok, msg, saleId);
   }
 
   Future<(bool ok, String message)> deleteRemoteSale(int id) async {
@@ -1221,14 +1247,25 @@ class AuthService {
     String path,
     Map<String, Object?> payload,
   ) async {
+    final (ok, msg, _) = await _postRemoteAuthorizedFull(path, payload);
+    return (ok, msg);
+  }
+
+  Future<(bool ok, String message, Map<String, dynamic>?)>
+      _postRemoteAuthorizedFull(
+    String path,
+    Map<String, Object?> payload,
+  ) async {
     if (!await isRemoteUser()) {
-      return (false, 'Local account: data is stored on this device only.');
+      return (false, 'Local account: data is stored on this device only.', null);
     }
     final baseUrl = await getMotherApiBaseUrl();
-    if (baseUrl == null) return (true, 'Remote API not configured.');
+    if (baseUrl == null) {
+      return (true, 'Remote API not configured.', null);
+    }
     final token = await getToken();
     if (token == null || token.isEmpty) {
-      return (false, 'Missing remote token. Please sign in again.');
+      return (false, 'Missing remote token. Please sign in again.', null);
     }
     try {
       final response = await http
@@ -1243,17 +1280,25 @@ class AuthService {
           .timeout(const Duration(seconds: 10));
       final data = _decodeJson(response.body);
       if (response.statusCode >= 200 && response.statusCode < 300) {
-        return (true, (data['message'] ?? 'Synced to mother').toString());
+        return (
+          true,
+          (data['message'] ?? 'Synced to mother').toString(),
+          data,
+        );
       }
-      return (false, (data['message'] ?? 'Remote sync failed').toString());
+      return (
+        false,
+        (data['message'] ?? 'Remote sync failed').toString(),
+        data,
+      );
     } on SocketException {
-      return (false, 'Cannot reach mother API.');
+      return (false, 'Cannot reach mother API.', null);
     } on http.ClientException {
-      return (false, 'Cannot reach mother API.');
+      return (false, 'Cannot reach mother API.', null);
     } on TimeoutException {
-      return (false, 'Mother API request timed out.');
+      return (false, 'Mother API request timed out.', null);
     } catch (_) {
-      return (false, 'Remote sync failed.');
+      return (false, 'Remote sync failed.', null);
     }
   }
 

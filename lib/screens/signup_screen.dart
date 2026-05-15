@@ -101,6 +101,8 @@ class _SignupScreenState extends State<SignupScreen> {
       Navigator.of(context).pushReplacementNamed(AppRouter.main);
       return;
     }
+    await _db.ensureGeneratedPrimaryCodesAndMoveLegacyCodes();
+    if (!mounted) return;
     final hasBusiness = await _db.hasBusinessProfile();
     if (!mounted) return;
     if (!hasBusiness) {

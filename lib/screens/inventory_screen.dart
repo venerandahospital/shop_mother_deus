@@ -80,9 +80,6 @@ class _InventoryScreenState extends State<InventoryScreen>
   Future<void> _loadItems() async {
     setState(() => _loading = true);
     final isRemote = await _authService.isRemoteUser();
-    if (!isRemote) {
-      await _db.ensureGeneratedPrimaryCodesAndMoveLegacyCodes();
-    }
     final items = isRemote ? await _authService.fetchRemoteItems() : await _db.getItems();
     Map<int, List<String>> aliases = const {};
     if (!isRemote) {
@@ -208,12 +205,14 @@ class _InventoryScreenState extends State<InventoryScreen>
       final sku = (item.sku ?? '').toLowerCase();
       final barcode = (item.barcode ?? '').toLowerCase();
       final category = (item.category ?? '').toLowerCase();
-      if (itemBarcodeOrSkuMatchesScanned(
-        item.barcode,
-        item.sku,
-        trimmed,
-        acceptedBarcodes: _itemBarcodeAliases[item.id ?? -1] ?? const [],
-      )) {
+      if (barcodeScanMatchKindForItem(
+            barcode: item.barcode,
+            sku: item.sku,
+            scanned: trimmed,
+            acceptedBarcodes:
+                _itemBarcodeAliases[item.id ?? -1] ?? const [],
+          ) !=
+          BarcodeScanMatchKind.none) {
         return true;
       }
       return name.contains(query) ||

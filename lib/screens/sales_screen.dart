@@ -15,7 +15,9 @@ import '../services/auth_service.dart';
 import '../utils/barcode_utils.dart';
 import '../utils/number_display.dart';
 import '../utils/text_format.dart';
+import '../utils/meter_fixed_stock_items.dart';
 import '../widgets/section_page_title.dart';
+import '../navigation/main_shell_tab_bus.dart';
 import 'sale_quantity_screen.dart';
 import 'sale_client_screen.dart';
 import 'sale_item_screen.dart';
@@ -154,6 +156,13 @@ class _SalesScreenState extends State<SalesScreen> {
     sale ??= raw.toLowerCase();
     return sale == 'service';
   }
+
+  bool _isMeterFixedStockItem(Item item) =>
+      isMeterSoldFixedStockItemName(item.name);
+
+  /// Service lines or fixed-stock items (Ekiveera, carpet, ebinyobwa): no cap from [Item.stockQty].
+  bool _lineIgnoresStockOnHand(Item item) =>
+      _isServiceSaleItem(item) || _isMeterFixedStockItem(item);
 
   String _saleCategoryLabel(Item item) {
     final raw = (item.category ?? '').trim();
@@ -642,7 +651,7 @@ class _SalesScreenState extends State<SalesScreen> {
   Future<void> _addToCart({double? forcedQty, double? forcedProductDiscount}) async {
     if (_selectedItem == null) return;
     final selectedItem = _selectedItem!;
-    final isService = _isServiceSaleItem(selectedItem);
+    final skipStockCap = _lineIgnoresStockOnHand(selectedItem);
 
     final qty =
         forcedQty ?? (double.tryParse(_qtyController.text.replaceAll(',', '.')) ?? 0);
@@ -653,7 +662,7 @@ class _SalesScreenState extends State<SalesScreen> {
       ).showSnackBar(const SnackBar(content: Text('Enter a valid quantity')));
       return;
     }
-    if (!isService) {
+    if (!skipStockCap) {
       // Ensure we don't exceed available stock for this item
       final currentQtyForItem = _cart
           .where((e) => e.item.id == selectedItem.id)
@@ -713,7 +722,8 @@ class _SalesScreenState extends State<SalesScreen> {
         );
         return;
       }
-      if (!_isServiceSaleItem(entry.item) && entry.quantity > entry.item.stockQty) {
+      if (!_lineIgnoresStockOnHand(entry.item) &&
+          entry.quantity > entry.item.stockQty) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -845,8 +855,47 @@ class _SalesScreenState extends State<SalesScreen> {
         )
         .toList();
 
-    final saleId = await _db.createSale(sale, saleItems);
     final isRemote = await _authService.isRemoteUser();
+    final remotePayload = <String, Object?>{
+      'storeId': storeId,
+      'totalAmount': totalAmount,
+      'overallDiscount': _effectiveDiscount,
+      'amountReceived': amountReceived,
+      'balance': balance,
+      'customerName': clientForSale?.name ?? '',
+      'customerPhone': clientForSale?.phone ?? '',
+      'customerAddress': clientForSale?.address ?? '',
+      'paymentMethod': _salePaymentMethodWireValue(_paymentMethod),
+      'items': saleItems
+          .map(
+            (e) => <String, Object?>{
+              'itemId': e.itemId,
+              'quantity': e.quantity,
+              'unitPrice': e.unitPrice,
+              'productDiscount': e.productDiscount,
+            },
+          )
+          .toList(),
+    };
+
+    late final int saleId;
+    if (isRemote) {
+      final remoteResult = await _authService.createRemoteSale(remotePayload);
+      if (!remoteResult.$1) {
+        if (!mounted) return;
+        setState(() {
+          _saving = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(remoteResult.$2)),
+        );
+        return;
+      }
+      saleId = remoteResult.$3 ?? 0;
+    } else {
+      saleId = await _db.createSale(sale, saleItems);
+    }
+
     if (_paymentMethod == _SalePaymentMethod.account &&
         amountReceived > 0 &&
         clientForSale?.id != null) {
@@ -873,32 +922,13 @@ class _SalesScreenState extends State<SalesScreen> {
         );
       }
     }
-    final remotePayload = {
-      'storeId': storeId,
-      'totalAmount': totalAmount,
-      'overallDiscount': _effectiveDiscount,
-      'amountReceived': amountReceived,
-      'balance': balance,
-      'customerName': clientForSale?.name ?? '',
-      'customerPhone': clientForSale?.phone ?? '',
-      'customerAddress': clientForSale?.address ?? '',
-      'paymentMethod': _salePaymentMethodWireValue(_paymentMethod),
-      'items': saleItems
-          .map(
-            (e) => {
-              'itemId': e.itemId,
-              'quantity': e.quantity,
-              'unitPrice': e.unitPrice,
-              'productDiscount': e.productDiscount,
-            },
-          )
-          .toList(),
-    };
-    await _db.updateSaleRemoteSyncStatus(
-      saleId: saleId,
-      status: isRemote ? 'pending' : 'local',
-      message: isRemote ? 'Queued for remote sync' : 'Saved on this device.',
-    );
+    if (!isRemote) {
+      await _db.updateSaleRemoteSyncStatus(
+        saleId: saleId,
+        status: 'local',
+        message: 'Saved on this device.',
+      );
+    }
     final receiptLines = _cart
         .map(
           (e) => _SaleReceiptLine(
@@ -921,6 +951,10 @@ class _SalesScreenState extends State<SalesScreen> {
       _paymentMode = _PaymentMode.all;
       _paymentMethod = _SalePaymentMethod.cash;
     });
+    if (isRemote) {
+      await _loadItems();
+    }
+    if (!mounted) return;
     await _showSaleReceiptPopup(
       saleId: saleId,
       totalAmount: totalAmount,
@@ -929,9 +963,6 @@ class _SalesScreenState extends State<SalesScreen> {
       balance: balance,
       lines: receiptLines,
     );
-    if (isRemote) {
-      unawaited(_syncSaleInBackground(saleId: saleId, payload: remotePayload));
-    }
   }
 
   Future<void> _showSaleReceiptPopup({
@@ -954,41 +985,32 @@ class _SalesScreenState extends State<SalesScreen> {
         amountReceived: amountReceived,
         balance: balance,
         lines: lines,
+        onProceedToSalesHistory: _navigateToSalesHistoryAfterSale,
       ),
     );
   }
 
-  Future<void> _syncSaleInBackground({
-    required int saleId,
-    required Map<String, dynamic> payload,
-  }) async {
-    try {
-      final syncResult = await _authService.createRemoteSale(payload);
-      await _db.updateSaleRemoteSyncStatus(
-        saleId: saleId,
-        status: syncResult.$1 ? 'synced' : 'failed',
-        message: syncResult.$2,
-      );
-    } catch (e) {
-      await _db.updateSaleRemoteSyncStatus(
-        saleId: saleId,
-        status: 'failed',
-        message: 'Remote sync error: $e',
-      );
-    }
+  /// Bottom tab 1 is [SalesHistoryScreen]. Also pops this screen when it was opened on top of the shell (e.g. from Dashboard).
+  void _navigateToSalesHistoryAfterSale() {
+    if (!mounted) return;
+    MainShellTabBus.instance.selectTab(1);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      Navigator.of(context).maybePop();
+    });
   }
 
   List<Item> _itemsMatchingBarcode(String scanned) {
-    return _items
-        .where(
-          (e) => itemBarcodeOrSkuMatchesScanned(
-            e.barcode,
-            e.sku,
-            scanned,
-            acceptedBarcodes: _itemBarcodeAliases[e.id ?? -1] ?? const [],
-          ),
-        )
-        .toList();
+    return itemsMatchingBarcodeScan<Item>(
+      _items,
+      scanned,
+      (e) => barcodeScanMatchKindForItem(
+        barcode: e.barcode,
+        sku: e.sku,
+        scanned: scanned,
+        acceptedBarcodes: _itemBarcodeAliases[e.id ?? -1] ?? const [],
+      ),
+    );
   }
 
   Future<void> _openBarcodeScannerFromSalePage() async {
@@ -1013,8 +1035,27 @@ class _SalesScreenState extends State<SalesScreen> {
     final trimmed = code.trim();
     if (trimmed.isEmpty) return;
     final matches = _itemsMatchingBarcode(trimmed);
+    final usedPartialMatch = matches.isNotEmpty &&
+        barcodeScanMatchKindForItem(
+              barcode: matches.first.barcode,
+              sku: matches.first.sku,
+              scanned: trimmed,
+              acceptedBarcodes:
+                  _itemBarcodeAliases[matches.first.id ?? -1] ?? const [],
+            ) ==
+            BarcodeScanMatchKind.fuzzy;
     if (matches.length == 1) {
       final item = matches.first;
+      if (usedPartialMatch && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Matched from a partial barcode scan — check the item is correct.',
+            ),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
       setState(() {
         _selectedItem = item;
         if (_isAllReceived) {
@@ -1127,7 +1168,9 @@ class _SalesScreenState extends State<SalesScreen> {
     final currentQty = _cart
         .where((e) => e.item.id == _selectedItem!.id)
         .fold<double>(0, (sum, e) => sum + e.quantity);
-    final maxAvailable = _selectedItem!.stockQty - currentQty;
+    final maxAvailable = _isMeterFixedStockItem(_selectedItem!)
+        ? 1e12
+        : (_selectedItem!.stockQty - currentQty);
     final result = await Navigator.of(context).push<Map<String, String>>(
       MaterialPageRoute<Map<String, String>>(
         builder: (context) => SaleQuantityScreen(
@@ -1171,7 +1214,8 @@ class _SalesScreenState extends State<SalesScreen> {
         builder: (context) => SaleQuantityScreen(
           item: entry.item,
           cartTotal: baseCartTotal,
-          maxAvailable: entry.item.stockQty,
+          maxAvailable:
+              _isMeterFixedStockItem(entry.item) ? 1e12 : entry.item.stockQty,
           initialQuantity: _fmtCompactNumber(entry.quantity),
           initialProductDiscount:
               entry.productDiscount > 0 ? _fmtCompactNumber(entry.productDiscount) : '',
@@ -1189,7 +1233,8 @@ class _SalesScreenState extends State<SalesScreen> {
       );
       return;
     }
-    final stockCap = entry.item.stockQty;
+    final stockCap =
+        _isMeterFixedStockItem(entry.item) ? 1e12 : entry.item.stockQty;
     if (newQty > stockCap) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -1332,48 +1377,51 @@ class _SalesScreenState extends State<SalesScreen> {
                         borderRadius: BorderRadius.circular(18),
                       ),
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+                        padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
                       if (!kIsWeb) ...[
                         Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 6),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                          padding: const EdgeInsets.symmetric(horizontal: 2),
+                          child: Row(
                             children: [
-                              FilledButton.icon(
-                                onPressed: _items.isEmpty
-                                    ? null
-                                    : _openBarcodeScannerFromSalePage,
-                                icon: const Icon(Icons.qr_code_scanner),
-                                label:
-                                    const Text('Scan barcode with phone camera'),
-                                style: FilledButton.styleFrom(
-                                  padding:
-                                      const EdgeInsets.symmetric(vertical: 14),
-                                  backgroundColor: const Color(0xFF2563EB),
-                                  foregroundColor: Colors.white,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              TextButton(
-                                onPressed:
-                                    _items.isEmpty ? null : () => _openItemPage(),
-                                style: TextButton.styleFrom(
-                                  visualDensity: VisualDensity.compact,
-                                  tapTargetSize:
-                                      MaterialTapTargetSize.shrinkWrap,
-                                  minimumSize: Size.zero,
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 4,
-                                    vertical: 0,
+                              Expanded(
+                                child: FilledButton.icon(
+                                  onPressed: _items.isEmpty
+                                      ? null
+                                      : _openBarcodeScannerFromSalePage,
+                                  icon: const Icon(
+                                    Icons.qr_code_scanner,
+                                    size: 20,
+                                  ),
+                                  label: const Text('Scan barcode'),
+                                  style: FilledButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 10,
+                                      horizontal: 6,
+                                    ),
+                                    backgroundColor: const Color(0xFF2563EB),
+                                    foregroundColor: Colors.white,
                                   ),
                                 ),
-                                child: const Text(
-                                  'Pick from list instead',
-                                  style: TextStyle(fontSize: 14),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: _items.isEmpty
+                                      ? null
+                                      : () => _openItemPage(),
+                                  icon: const Icon(Icons.list, size: 20),
+                                  label: const Text('Pick from list'),
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 10,
+                                      horizontal: 6,
+                                    ),
+                                    visualDensity: VisualDensity.compact,
+                                  ),
                                 ),
                               ),
                             ],
@@ -1834,6 +1882,7 @@ class _SaleReceiptDialog extends StatefulWidget {
     required this.amountReceived,
     required this.balance,
     required this.lines,
+    this.onProceedToSalesHistory,
   });
 
   final int saleId;
@@ -1843,33 +1892,50 @@ class _SaleReceiptDialog extends StatefulWidget {
   final double amountReceived;
   final double balance;
   final List<_SaleReceiptLine> lines;
+  final VoidCallback? onProceedToSalesHistory;
 
   @override
   State<_SaleReceiptDialog> createState() => _SaleReceiptDialogState();
 }
 
 class _SaleReceiptDialogState extends State<_SaleReceiptDialog> {
-  Timer? _autoCloseTimer;
+  Timer? _autoCloseTicker;
+  late int _secondsLeft;
 
   @override
   void initState() {
     super.initState();
-    _autoCloseTimer = Timer(const Duration(seconds: 10), () {
+    _secondsLeft = 20;
+    _autoCloseTicker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
-      Navigator.of(context).pop();
+      if (_secondsLeft <= 1) {
+        _autoCloseTicker?.cancel();
+        Navigator.of(context).pop();
+        return;
+      }
+      setState(() => _secondsLeft--);
     });
   }
 
   @override
   void dispose() {
-    _autoCloseTimer?.cancel();
+    _autoCloseTicker?.cancel();
     super.dispose();
+  }
+
+  void _goToSalesHistory() {
+    _autoCloseTicker?.cancel();
+    if (!mounted) return;
+    Navigator.of(context).pop();
+    widget.onProceedToSalesHistory?.call();
   }
 
   String _fmtMoney(double value) => formatMoney(value);
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final linkColor = theme.colorScheme.primary;
     final grandSubtotal = widget.lines.fold<double>(
       0,
       (sum, line) => sum + line.netTotal,
@@ -1988,20 +2054,28 @@ class _SaleReceiptDialogState extends State<_SaleReceiptDialog> {
                 bold: true,
               ),
               const SizedBox(height: 10),
-              const Text(
-                'This receipt closes automatically in 10 seconds.',
-                style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+              Text(
+                'This receipt closes automatically in $_secondsLeft ${_secondsLeft == 1 ? 'second' : 'seconds'}.',
+                style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
               ),
               const SizedBox(height: 10),
               Align(
                 alignment: Alignment.center,
-                child: Text(
-                  'Proceed to the Sales history page',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Color(0xFF6B7280),
-                    fontWeight: FontWeight.w500,
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: GestureDetector(
+                    onTap: _goToSalesHistory,
+                    child: Text(
+                      'Proceed to the Sales history page',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: linkColor,
+                        fontWeight: FontWeight.w600,
+                        decoration: TextDecoration.underline,
+                        decorationColor: linkColor,
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -2011,7 +2085,10 @@ class _SaleReceiptDialogState extends State<_SaleReceiptDialog> {
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: () {
+            _autoCloseTicker?.cancel();
+            Navigator.of(context).pop();
+          },
           child: const Text('Close'),
         ),
       ],
