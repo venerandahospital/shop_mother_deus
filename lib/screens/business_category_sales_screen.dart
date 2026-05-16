@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
 import '../services/app_settings_service.dart';
-import '../services/auth_service.dart';
 import '../services/local_db_service.dart';
 import '../utils/number_display.dart';
 import '../utils/text_format.dart';
@@ -24,7 +23,6 @@ class BusinessCategorySalesScreen extends StatefulWidget {
 
 class _BusinessCategorySalesScreenState extends State<BusinessCategorySalesScreen> {
   final _db = LocalDbService.instance;
-  final _authService = AuthService();
   final _appSettings = AppSettingsService.instance;
 
   bool _loading = true;
@@ -88,11 +86,12 @@ class _BusinessCategorySalesScreenState extends State<BusinessCategorySalesScree
             59,
             999,
           );
-    final data = await _authService.isRemoteUser()
-        ? await _authService.fetchRemoteSalesHistory(start: rangeStart, end: rangeEnd)
-        : (rangeStart != null && rangeEnd != null
-            ? await _db.getSalesWithItemDetailsInRange(start: rangeStart, end: rangeEnd)
-            : await _db.getSalesWithItemDetails());
+    final data = rangeStart != null && rangeEnd != null
+        ? await _db.getSalesWithItemDetailsInRange(
+            start: rangeStart,
+            end: rangeEnd,
+          )
+        : await _db.getSalesWithItemDetails();
     if (!mounted) return;
     setState(() {
       _rows = data;

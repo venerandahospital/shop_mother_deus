@@ -308,27 +308,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   /// Business category breakdown grid — only when that section is expanded.
+  /// Always reads the primary device SQLite (mother main DB); never via remote API.
   Future<void> _loadBusinessCategoryMetrics() async {
     if (!mounted) return;
     setState(() => _businessCategoryLoading = true);
     try {
-      final isRemoteUser = await _auth.isRemoteUser();
-      if (isRemoteUser) {
-        await _auth.resolveMotherApiBaseUrl(
-          discoveryTimeout: const Duration(seconds: 4),
-        );
-      }
-      final saleLines = isRemoteUser
-          ? await _auth.fetchRemoteSalesHistory(
-              start: _rangeStartFor(_businessRange),
-              end: _rangeEndFor(_businessRange),
-            )
-          : (_businessRange == _OverviewRange.all
-              ? await _db.getSalesWithItemDetails()
-              : await _db.getSalesWithItemDetailsInRange(
-                  start: _rangeStartFor(_businessRange)!,
-                  end: _rangeEndFor(_businessRange)!,
-                ));
+      final saleLines = _businessRange == _OverviewRange.all
+          ? await _db.getSalesWithItemDetails()
+          : await _db.getSalesWithItemDetailsInRange(
+              start: _rangeStartFor(_businessRange)!,
+              end: _rangeEndFor(_businessRange)!,
+            );
       final categoryTotals = _categoryTotalsFromRows(saleLines);
 
       if (!mounted) return;

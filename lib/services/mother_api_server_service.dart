@@ -537,6 +537,23 @@ class MotherApiServerService {
           if (persistedId != null && persistedId > 0) {
             if (_bodyHasKey(body, 'acceptedBarcodes', 'accepted_barcodes')) {
               final accepted = _parseAcceptedBarcodesList(body);
+              for (final raw in accepted) {
+                final code = raw.trim();
+                if (code.isEmpty) continue;
+                final conflict = await LocalDbService.instance
+                    .findConflictingBarcode([code], excludingItemId: persistedId);
+                if (conflict != null) {
+                  final owner = await LocalDbService.instance.findItemByAnyCode(
+                    conflict,
+                    excludingItemId: persistedId,
+                  );
+                  final name = (owner?.name ?? '').trim();
+                  final msg = name.isEmpty
+                      ? 'Code "$conflict" is already used by another item.'
+                      : 'Code "$conflict" is already used by item "$name".';
+                  return _sendJson(request, 409, {'message': msg});
+                }
+              }
               await LocalDbService.instance.replaceItemBarcodes(
                 itemId: persistedId,
                 barcodes: accepted,
@@ -916,7 +933,19 @@ class MotherApiServerService {
       if (request.method == 'GET' && request.uri.path == '/sales/history') {
         final userId = await _requireApprovedRemoteUserOrRespond(request);
         if (userId == null) return;
-        final rows = await LocalDbService.instance.getSalesWithItemDetails();
+        final startStr = request.uri.queryParameters['start'];
+        final endStr = request.uri.queryParameters['end'];
+        final start = startStr == null ? null : DateTime.tryParse(startStr);
+        final end = endStr == null ? null : DateTime.tryParse(endStr);
+        final List<Map<String, Object?>> rows;
+        if (start != null && end != null) {
+          rows = await LocalDbService.instance.getSalesWithItemDetailsInRange(
+            start: start,
+            end: end,
+          );
+        } else {
+          rows = await LocalDbService.instance.getSalesWithItemDetails();
+        }
         return _sendJson(request, 200, {'data': rows});
       }
       if (request.method == 'GET' && request.uri.path == '/sales/by-customer') {
@@ -1211,6 +1240,80 @@ class MotherApiServerService {
         return _sendJson(request, 200, {
           'message': deleted > 0 ? 'Expense deleted' : 'Expense not found',
           'data': rows.map((e) => e.toMap()).toList(),
+        });
+      }
+      if (request.uri.path == '/cart-drafts') {
+        final userId = await _requireApprovedRemoteUserOrRespond(request);
+        if (userId == null) return;
+        if (request.method == 'GET') {
+          final rows = await LocalDbService.instance.getCartDrafts();
+          return _sendJson(request, 200, {
+            'data': rows.map((e) => e.toApiJson()).toList(),
+          });
+        }
+        if (request.method == 'POST' || request.method == 'PUT') {
+          final body = await _readBody(request);
+          final title = (body['title'] ?? '').toString().trim();
+          if (title.isEmpty) {
+            return _sendJson(request, 400, {'message': 'Draft title is required'});
+          }
+          final payloadRaw = body['payload'] ?? body['payloadJson'];
+          final String payloadJson;
+          if (payloadRaw == null) {
+            return _sendJson(
+              request,
+              400,
+              {'message': 'Draft payload is required'},
+            );
+          }
+          if (payloadRaw is String) {
+            payloadJson = payloadRaw.trim();
+          } else {
+            payloadJson = jsonEncode(payloadRaw);
+          }
+          if (payloadJson.isEmpty) {
+            return _sendJson(request, 400, {'message': 'Draft payload is empty'});
+          }
+          try {
+            final id = await LocalDbService.instance.insertCartDraft(
+              title: title,
+              payloadJson: payloadJson,
+            );
+            final rows = await LocalDbService.instance.getCartDrafts();
+            return _sendJson(request, 200, {
+              'message': 'Draft saved',
+              'id': id,
+              'data': rows.map((e) => e.toApiJson()).toList(),
+            });
+          } catch (e) {
+            return _sendJson(request, 400, {'message': e.toString()});
+          }
+        }
+      }
+      if ((request.method == 'POST' || request.method == 'PUT') &&
+          request.uri.path == '/cart-drafts/delete') {
+        final userId = await _requireApprovedRemoteUserOrRespond(request);
+        if (userId == null) return;
+        final body = await _readBody(request);
+        final draftId = _asInt(body['id']);
+        if (draftId == null) {
+          return _sendJson(request, 400, {'message': 'Missing draft id'});
+        }
+        await LocalDbService.instance.deleteCartDraft(draftId);
+        final rows = await LocalDbService.instance.getCartDrafts();
+        return _sendJson(request, 200, {
+          'message': 'Draft deleted',
+          'data': rows.map((e) => e.toApiJson()).toList(),
+        });
+      }
+      if ((request.method == 'POST' || request.method == 'PUT') &&
+          request.uri.path == '/cart-drafts/delete-all') {
+        final userId = await _requireApprovedRemoteUserOrRespond(request);
+        if (userId == null) return;
+        await LocalDbService.instance.deleteAllCartDrafts();
+        return _sendJson(request, 200, {
+          'message': 'All drafts deleted',
+          'data': <Map<String, dynamic>>[],
         });
       }
       if (request.uri.path == '/assets') {
