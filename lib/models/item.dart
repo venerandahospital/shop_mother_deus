@@ -24,6 +24,8 @@ class Item {
   final double specialRollMetersTotal;
   /// Metres/units sold from the current roll (special items only).
   final double specialRollMetersSold;
+  /// When false, sales skip stock checks and stock is not reduced until counted.
+  final bool stockHandCounted;
   final DateTime createdAt;
 
   Item({
@@ -49,6 +51,7 @@ class Item {
     this.restockTo = 0,
     this.specialRollMetersTotal = 0,
     this.specialRollMetersSold = 0,
+    this.stockHandCounted = false,
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
 
@@ -91,6 +94,7 @@ class Item {
           (map['special_roll_meters_sold'] as num?)?.toDouble() ??
           (map['specialRollMetersSold'] as num?)?.toDouble() ??
           0,
+      stockHandCounted: _stockHandCountedFromMap(map),
       createdAt: DateTime.tryParse(map['created_at'] as String? ?? '') ??
           DateTime.now(),
     );
@@ -120,6 +124,7 @@ class Item {
       'restock_to': restockTo,
       'special_roll_meters_total': specialRollMetersTotal,
       'special_roll_meters_sold': specialRollMetersSold,
+      'stock_hand_counted': stockHandCounted ? 1 : 0,
       'created_at': createdAt.toIso8601String(),
     };
   }
@@ -147,6 +152,7 @@ class Item {
     double? restockTo,
     double? specialRollMetersTotal,
     double? specialRollMetersSold,
+    bool? stockHandCounted,
     DateTime? createdAt,
   }) {
     return Item(
@@ -174,8 +180,22 @@ class Item {
           specialRollMetersTotal ?? this.specialRollMetersTotal,
       specialRollMetersSold:
           specialRollMetersSold ?? this.specialRollMetersSold,
+      stockHandCounted: stockHandCounted ?? this.stockHandCounted,
       createdAt: createdAt ?? this.createdAt,
     );
+  }
+
+  static bool _stockHandCountedFromMap(Map<String, dynamic> map) {
+    final raw = map['stock_hand_counted'] ?? map['stockHandCounted'];
+    if (raw is bool) return raw;
+    if (raw is int) return raw != 0;
+    if (raw is num) return raw != 0;
+    if (raw is String) {
+      final s = raw.trim().toLowerCase();
+      if (s == 'true' || s == '1') return true;
+      if (s == 'false' || s == '0') return false;
+    }
+    return false;
   }
 }
 

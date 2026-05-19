@@ -164,6 +164,7 @@ class _SalesScreenState extends State<SalesScreen> {
   /// Service lines, or special items with stock 1: sell any quantity without
   /// reducing stock at hand (stock is only 0 or 1 for those items).
   bool _lineIgnoresStockOnHand(Item item) {
+    if (!item.stockHandCounted) return true;
     if (_isServiceSaleItem(item)) return true;
     if (_isMeterFixedStockItem(item) && item.stockQty > 0) return true;
     return false;

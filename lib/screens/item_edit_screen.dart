@@ -9,6 +9,7 @@ import '../services/local_db_service.dart';
 import '../utils/meter_fixed_stock_items.dart';
 import '../widgets/section_page_title.dart';
 import 'barcode_scan_screen.dart';
+import 'barcode_labels_screen.dart';
 
 class ItemEditScreen extends StatefulWidget {
   final Item? item;
@@ -1217,7 +1218,7 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
     if (isMeterSoldFixedStockItemName(itemName)) {
       resolvedStock = isNewItem
           ? kSpecialItemUnavailableStock
-          : (base!.stockQty > 0
+          : (base.stockQty > 0
               ? kSpecialItemAvailableStock
               : kSpecialItemUnavailableStock);
     }
@@ -1339,6 +1340,7 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
       createdAt: base?.createdAt,
       specialRollMetersTotal: base?.specialRollMetersTotal ?? 0,
       specialRollMetersSold: base?.specialRollMetersSold ?? 0,
+      stockHandCounted: base?.stockHandCounted ?? false,
     );
 
     if (await _authService.isRemoteUser()) {
@@ -1393,6 +1395,8 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
       }
       if (!mounted) return;
       setState(() => _saving = false);
+      await _offerPrintLabelForNewItem(wasNew: base == null, savedItem: merged);
+      if (!mounted) return;
       Navigator.of(context).pop(true);
       return;
     }
@@ -1408,10 +1412,67 @@ class _ItemEditScreenState extends State<ItemEditScreen> {
     await _applyItemAliasBarcodes(idForAliases, savedPrimary, enteredBarcodes);
 
     if (!mounted) return;
-    setState(() {
-      _saving = false;
-    });
+    setState(() => _saving = false);
+
+    Item? savedItem;
+    if (idForAliases > 0) {
+      savedItem = await _db.getItemById(idForAliases);
+    }
+    await _offerPrintLabelForNewItem(wasNew: base == null, savedItem: savedItem);
+
+    if (!mounted) return;
     Navigator.of(context).pop(true);
+  }
+
+  Future<void> _offerPrintLabelForNewItem({
+    required bool wasNew,
+    required Item? savedItem,
+  }) async {
+    if (!wasNew || savedItem == null || !mounted) return;
+    final printNow = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Print barcode label?'),
+        content: Text(
+          'Print one label for ${savedItem.name}? '
+          'You can also print later from Print barcode labels on Items.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Print'),
+          ),
+        ],
+      ),
+    );
+    if (printNow != true || !mounted) return;
+    final isRemote = await _authService.isRemoteUser();
+    late final List<Item> catalog;
+    late final Map<int, List<String>> aliases;
+    if (isRemote) {
+      final loaded = await _authService.fetchRemoteItemsWithBarcodes();
+      catalog = loaded.$1;
+      aliases = loaded.$2;
+    } else {
+      catalog = await _db.getItems();
+      final ids = catalog.map((e) => e.id).whereType<int>();
+      aliases = await _db.getItemBarcodesMap(itemIds: ids);
+    }
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => BarcodeLabelsScreen(
+          items: catalog,
+          barcodeAliasesByItemId: aliases,
+          initialCustomItems: [savedItem],
+          initialTabIndex: 2,
+        ),
+      ),
+    );
   }
 
   bool _hasImageAt(int index) {

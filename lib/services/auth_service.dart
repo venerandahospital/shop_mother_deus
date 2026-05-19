@@ -1093,10 +1093,28 @@ class AuthService {
     });
   }
 
-  Future<List<Item>> fetchRemoteItems() async {
+  Future<(List<Item> items, Map<int, List<String>> aliases)>
+      fetchRemoteItemsWithBarcodes() async {
     final data = await _getRemoteAuthorized('/items');
-    if (data == null) return const <Item>[];
+    if (data == null) {
+      return (const <Item>[], const <int, List<String>>{});
+    }
     final rows = data['data'];
+    if (rows is! List) {
+      return (const <Item>[], const <int, List<String>>{});
+    }
+    return (
+      _itemsFromRemotePayload(rows),
+      _aliasesFromRemotePayload(rows),
+    );
+  }
+
+  Future<List<Item>> fetchRemoteItems() async {
+    final (items, _) = await fetchRemoteItemsWithBarcodes();
+    return items;
+  }
+
+  List<Item> _itemsFromRemotePayload(Object? rows) {
     if (rows is! List) return const <Item>[];
     final result = <Item>[];
     for (final row in rows) {
@@ -1107,6 +1125,92 @@ class AuthService {
       }
     }
     return result;
+  }
+
+  Map<int, List<String>> _aliasesFromRemotePayload(Object? rows) {
+    if (rows is! List) return const {};
+    final map = <int, List<String>>{};
+    for (final row in rows) {
+      if (row is! Map) continue;
+      final m = row is Map<String, dynamic>
+          ? row
+          : Map<String, dynamic>.from(row);
+      final id = m['id'];
+      final parsedId = id is int ? id : int.tryParse(id?.toString() ?? '');
+      if (parsedId == null || parsedId <= 0) continue;
+      final raw = m['accepted_barcodes'] ?? m['acceptedBarcodes'];
+      if (raw is! List) continue;
+      final codes = raw
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
+      if (codes.isNotEmpty) {
+        map[parsedId] = codes;
+      }
+    }
+    return map;
+  }
+
+  Future<(bool ok, String message, List<Item> items, Map<int, List<String>> aliases)>
+      fetchRemoteStockTakeItems() async {
+    final data = await _getRemoteAuthorized('/items/stock-take');
+    if (data == null) {
+      return (
+        false,
+        'Could not load stock take list.',
+        const <Item>[],
+        const <int, List<String>>{},
+      );
+    }
+    final rows = data['data'];
+    return (
+      true,
+      '',
+      _itemsFromRemotePayload(rows),
+      _aliasesFromRemotePayload(rows),
+    );
+  }
+
+  Future<(bool ok, String message, List<Item> items, Map<int, List<String>> aliases)>
+      updateRemoteStockTakeQty({
+    required int itemId,
+    required double stockQty,
+  }) async {
+    final (ok, msg, data) = await _postRemoteAuthorizedFull(
+      '/items/stock-take/stock-qty',
+      {'itemId': itemId, 'stockQty': stockQty},
+    );
+    if (!ok) {
+      return (false, msg, const <Item>[], const <int, List<String>>{});
+    }
+    final rows = data?['data'];
+    return (
+      true,
+      msg,
+      _itemsFromRemotePayload(rows),
+      _aliasesFromRemotePayload(rows),
+    );
+  }
+
+  Future<(bool ok, String message, List<Item> items, Map<int, List<String>> aliases)>
+      markRemoteStockTakeCounted({
+    required int itemId,
+    bool counted = true,
+  }) async {
+    final (ok, msg, data) = await _postRemoteAuthorizedFull(
+      '/items/stock-take/mark-counted',
+      {'itemId': itemId, 'stockHandCounted': counted},
+    );
+    if (!ok) {
+      return (false, msg, const <Item>[], const <int, List<String>>{});
+    }
+    final rows = data?['data'];
+    return (
+      true,
+      msg,
+      _itemsFromRemotePayload(rows),
+      _aliasesFromRemotePayload(rows),
+    );
   }
 
   Future<List<Store>> fetchRemoteStores() async {

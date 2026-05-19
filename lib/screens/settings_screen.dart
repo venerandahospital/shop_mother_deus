@@ -57,6 +57,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _restoreRunning = false;
   bool _exchangingCode = false;
   bool _loading = true;
+  bool _isRemoteUser = false;
+  bool _itemCodesMigrationDone = false;
+  bool _itemCodesMigrationRunning = false;
   DateTime? _lastBackupAt;
   SubscriptionStatus? _subscriptionStatus;
   Map<String, String?> _businessProfile = const {};
@@ -126,6 +129,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final businessProfile = await LocalDbService.instance.getBusinessProfile();
     final motherApiEndpoints = await MotherApiServerService.instance
         .getAdvertisedEndpoints();
+    final isRemote = await _authService.isRemoteUser();
+    final codesMigrationDone =
+        await LocalDbService.instance.isPrimaryCodeMigrationCompleted();
 
     if (!mounted) return;
     setState(() {
@@ -142,8 +148,71 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _subscriptionStatus = subscriptionStatus;
       _businessProfile = businessProfile;
       _motherApiEndpoints = motherApiEndpoints;
+      _isRemoteUser = isRemote;
+      _itemCodesMigrationDone = codesMigrationDone;
       _loading = false;
     });
+  }
+
+  Future<void> _runUpdateItemCodes() async {
+    if (_itemCodesMigrationDone || _itemCodesMigrationRunning) {
+      return;
+    }
+    if (_isRemoteUser) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Update items codes is only available on the main shop (mother) device.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Update items codes?'),
+        content: const Text(
+          'Each item gets a unique internal primary code (ITM######) on sku and barcode. '
+          'Every other code already on that item — old sku, old barcode, and any extra '
+          'codes — that is not the primary is collected and saved as accepted alternative '
+          'codes for scanning.\n\n'
+          'Run this once after importing old stock. This cannot be undone from here.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Update codes'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+
+    setState(() => _itemCodesMigrationRunning = true);
+    final updated =
+        await LocalDbService.instance.ensureGeneratedPrimaryCodesAndMoveLegacyCodes();
+    if (!mounted) return;
+    setState(() {
+      _itemCodesMigrationRunning = false;
+      _itemCodesMigrationDone = true;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          updated > 0
+              ? 'Updated $updated item(s). Primary = ITM######; all other codes on each item are now accepted alternatives.'
+              : 'Item codes are already up to date.',
+        ),
+        duration: const Duration(seconds: 5),
+      ),
+    );
   }
 
   Future<void> _copyMotherApi(String url) async {
@@ -572,6 +641,68 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     });
                   },
                 ),
+                const SizedBox(height: 24),
+                Text(
+                  'Inventory codes',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Main shop (mother) device only. Child tablets cannot open Settings; '
+                  'they receive item codes from this device after you run this once. '
+                  'Sets ITM###### as each item\'s primary code and moves every other code '
+                  'on that item into accepted alternative codes.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: Colors.grey.shade800,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: (_itemCodesMigrationDone ||
+                            _itemCodesMigrationRunning)
+                        ? null
+                        : _runUpdateItemCodes,
+                    icon: _itemCodesMigrationRunning
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(Icons.qr_code_2),
+                    label: Text(
+                      _itemCodesMigrationRunning
+                          ? 'Updating item codes...'
+                          : _itemCodesMigrationDone
+                              ? 'Item codes updated'
+                              : 'Update items codes',
+                    ),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: _itemCodesMigrationDone
+                          ? Colors.grey.shade600
+                          : const Color(0xFF2563EB),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                  ),
+                ),
+                if (_itemCodesMigrationDone)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      'This step has already been completed on this device.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: Colors.green.shade800,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
                 const SizedBox(height: 24),
                 Text(
                   'Subscription',

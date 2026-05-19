@@ -21,6 +21,7 @@ import 'item_details_screen.dart';
 import 'stock_adjustment_screen.dart';
 import 'barcode_scan_screen.dart';
 import 'barcode_labels_screen.dart';
+import 'stock_take_screen.dart';
 
 class InventoryScreen extends StatefulWidget {
   const InventoryScreen({super.key});
@@ -81,9 +82,14 @@ class _InventoryScreenState extends State<InventoryScreen>
   Future<void> _loadItems() async {
     setState(() => _loading = true);
     final isRemote = await _authService.isRemoteUser();
-    final items = isRemote ? await _authService.fetchRemoteItems() : await _db.getItems();
-    Map<int, List<String>> aliases = const {};
-    if (!isRemote) {
+    late final List<Item> items;
+    late final Map<int, List<String>> aliases;
+    if (isRemote) {
+      final loaded = await _authService.fetchRemoteItemsWithBarcodes();
+      items = loaded.$1;
+      aliases = loaded.$2;
+    } else {
+      items = await _db.getItems();
       final ids = items.map((e) => e.id).whereType<int>();
       aliases = await _db.getItemBarcodesMap(itemIds: ids);
     }
@@ -273,6 +279,67 @@ class _InventoryScreenState extends State<InventoryScreen>
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('"${toTitleCaseWords(item.name)}" deleted')),
+    );
+  }
+
+  Future<void> _markStockHandNotCounted(Item item) async {
+    if (item.id == null || _isServiceSaleItem(item)) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Mark for re-count?'),
+        content: Text(
+          '${toTitleCaseWords(item.name)} will appear on Stock take. '
+          'Sales will not check stock until you count and mark it counted again.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Not counted'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    if (await _authService.isRemoteUser()) {
+      final remote = await _authService.saveRemoteItem({
+        'id': item.id,
+        'name': item.name,
+        'stockHandCounted': false,
+      });
+      if (!remote.$1) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(remote.$2)),
+        );
+        return;
+      }
+    }
+
+    await _db.setStockHandCounted(item.id!, false);
+    await _loadItems();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '${toTitleCaseWords(item.name)} marked not counted',
+        ),
+        action: SnackBarAction(
+          label: 'Open list',
+          onPressed: () {
+            Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => const StockTakeScreen(),
+              ),
+            );
+          },
+        ),
+      ),
     );
   }
 
@@ -530,7 +597,10 @@ class _InventoryScreenState extends State<InventoryScreen>
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute(
-                  builder: (_) => BarcodeLabelsScreen(items: _items),
+                  builder: (_) => BarcodeLabelsScreen(
+                    items: _items,
+                    barcodeAliasesByItemId: _itemBarcodeAliases,
+                  ),
                 ),
               );
             },
@@ -763,6 +833,12 @@ class _InventoryScreenState extends State<InventoryScreen>
                                               'Low stock',
                                               Colors.orange,
                                             ),
+                                          if (!item.stockHandCounted)
+                                            _statusChip(
+                                              context,
+                                              'Not counted',
+                                              Colors.deepOrange,
+                                            ),
                                         ],
                                       ],
                                     ),
@@ -835,6 +911,13 @@ class _InventoryScreenState extends State<InventoryScreen>
                                         }
                                       },
                                     ),
+                                    if (item.stockHandCounted)
+                                      IconButton(
+                                        icon: const Icon(Icons.fact_check_outlined),
+                                        tooltip: 'Mark not counted (re-count)',
+                                        onPressed: () =>
+                                            _markStockHandNotCounted(item),
+                                      ),
                                   ],
                                   Tooltip(
                                     message: 'Edit item',

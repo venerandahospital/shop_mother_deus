@@ -25,6 +25,7 @@ import 'services_screen.dart';
 import 'assets_screen.dart';
 import 'loans_screen.dart';
 import 'business_category_sales_screen.dart';
+import 'stock_take_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -1282,6 +1283,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
           onTap: () {
             Navigator.of(context).push(
               MaterialPageRoute(builder: (_) => const InventoryScreen()),
+            );
+          },
+        ),
+        _buildActionCard(
+          title: 'Stock take',
+          icon: Icons.fact_check_outlined,
+          color: Colors.deepOrange,
+          onTap: () {
+            Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => const StockTakeScreen(),
+              ),
             );
           },
         ),

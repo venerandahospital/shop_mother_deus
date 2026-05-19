@@ -4,6 +4,7 @@ import 'dart:collection';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import '../utils/barcode_scanner_lifecycle.dart';
 import '../widgets/section_page_title.dart';
 
 const _kSaleFlowAppBarBlue = Color(0xFF5181da);
@@ -18,7 +19,8 @@ class ProductQuantityCameraScreen extends StatefulWidget {
       _ProductQuantityCameraScreenState();
 }
 
-class _ProductQuantityCameraScreenState extends State<ProductQuantityCameraScreen> {
+class _ProductQuantityCameraScreenState extends State<ProductQuantityCameraScreen>
+    with WidgetsBindingObserver {
   static const int _kWindowSize = 8;
   final MobileScannerController _controller = MobileScannerController(
     facing: CameraFacing.back,
@@ -32,11 +34,12 @@ class _ProductQuantityCameraScreenState extends State<ProductQuantityCameraScree
   String _confidenceLabel = 'Low';
   bool _scannerMounted = true;
   bool _exiting = false;
+  bool _cameraReleased = false;
 
-  Future<void> _releaseCamera() async {
-    try {
-      await _controller.stop();
-    } catch (_) {}
+  Future<void> _releaseCameraFully() async {
+    if (_cameraReleased) return;
+    _cameraReleased = true;
+    await releaseMobileScannerController(_controller);
   }
 
   Future<void> _exit([Map<String, Object>? result]) async {
@@ -46,13 +49,61 @@ class _ProductQuantityCameraScreenState extends State<ProductQuantityCameraScree
       setState(() => _scannerMounted = false);
     }
     await WidgetsBinding.instance.endOfFrame;
-    await _releaseCamera();
+    await _releaseCameraFully();
     if (!mounted) return;
     Navigator.of(context).pop(result);
   }
 
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    _exiting = true;
+    WidgetsBinding.instance.removeObserver(this);
+    if (!_cameraReleased) {
+      unawaited(_releaseCameraFully());
+    }
+    super.dispose();
+  }
+
+  @override
+  void deactivate() {
+    super.deactivate();
+    if (!_exiting && !_cameraReleased) {
+      unawaited(pauseMobileScannerIfRunning(_controller));
+    }
+  }
+
+  @override
+  void activate() {
+    super.activate();
+    if (!_exiting && !_cameraReleased && _scannerMounted && !_frozen) {
+      unawaited(resumeMobileScannerIfPaused(_controller));
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_exiting || _cameraReleased) return;
+    switch (state) {
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+      case AppLifecycleState.hidden:
+        unawaited(pauseMobileScannerIfRunning(_controller));
+      case AppLifecycleState.resumed:
+        if (_scannerMounted && !_frozen) {
+          unawaited(resumeMobileScannerIfPaused(_controller));
+        }
+    }
+  }
+
   void _onDetect(BarcodeCapture capture) {
-    if (_exiting || _frozen) return;
+    if (_exiting || _frozen || _cameraReleased) return;
     final frameCounts = <String, int>{};
     for (final barcode in capture.barcodes) {
       final raw = (barcode.rawValue ?? '').trim();
@@ -129,16 +180,6 @@ class _ProductQuantityCameraScreenState extends State<ProductQuantityCameraScree
   }
 
   @override
-  void dispose() {
-    _exiting = true;
-    if (_scannerMounted) {
-      unawaited(_releaseCamera());
-    }
-    unawaited(_controller.dispose());
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     return PopScope(
       canPop: false,
@@ -161,7 +202,7 @@ class _ProductQuantityCameraScreenState extends State<ProductQuantityCameraScree
         body: Stack(
           fit: StackFit.expand,
           children: [
-            if (_scannerMounted)
+            if (_scannerMounted && !_cameraReleased)
               MobileScanner(
                 controller: _controller,
                 useAppLifecycleState: false,

@@ -98,9 +98,6 @@ class _LoginScreenState extends State<LoginScreen> {
       await _persistRememberedCredentials();
       if (!mounted) return;
       final userType = (result['userType'] ?? '').toString().toUpperCase();
-      if (userType != 'REMOTE') {
-        await _db.ensureGeneratedPrimaryCodesAndMoveLegacyCodes();
-      }
       if (!mounted) return;
       if (userType == 'REMOTE') {
         // Same shell as mother: bottom nav + dashboard tab (child has no Settings tab).

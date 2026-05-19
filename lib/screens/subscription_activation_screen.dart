@@ -78,9 +78,6 @@ class _SubscriptionActivationScreenState extends State<SubscriptionActivationScr
     final isLoggedIn = await _authService.isLoggedIn();
     if (!mounted) return;
     if (isLoggedIn) {
-      if (!await _authService.isRemoteUser()) {
-        await _db.ensureGeneratedPrimaryCodesAndMoveLegacyCodes();
-      }
       if (!mounted) return;
       Navigator.of(context).pushNamedAndRemoveUntil(AppRouter.main, (_) => false);
     } else {

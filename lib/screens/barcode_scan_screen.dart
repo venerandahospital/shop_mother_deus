@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import '../utils/barcode_scanner_lifecycle.dart';
 import '../widgets/section_page_title.dart';
 
 const _kSaleFlowAppBarBlue = Color(0xFF5181da);
@@ -15,7 +16,8 @@ class BarcodeScanScreen extends StatefulWidget {
   State<BarcodeScanScreen> createState() => _BarcodeScanScreenState();
 }
 
-class _BarcodeScanScreenState extends State<BarcodeScanScreen> {
+class _BarcodeScanScreenState extends State<BarcodeScanScreen>
+    with WidgetsBindingObserver {
   final MobileScannerController _controller = MobileScannerController(
     facing: CameraFacing.back,
     detectionSpeed: DetectionSpeed.noDuplicates,
@@ -23,20 +25,15 @@ class _BarcodeScanScreenState extends State<BarcodeScanScreen> {
   );
   bool _scannerMounted = true;
   bool _exiting = false;
-  bool _cameraStopped = false;
+  bool _cameraReleased = false;
 
-  Future<void> _releaseCamera() async {
-    if (_cameraStopped) return;
-    _cameraStopped = true;
-    try {
-      await _controller.stop();
-    } catch (_) {
-      // Camera may already be stopped when leaving the screen.
-    }
+  Future<void> _releaseCameraFully() async {
+    if (_cameraReleased) return;
+    _cameraReleased = true;
+    await releaseMobileScannerController(_controller);
   }
 
-  /// Unmounts the preview, stops the camera, then pops — avoids restarting the
-  /// camera during the route pop animation (which leaves Camera2 polling on some devices).
+  /// Unmounts preview, stops camera + native scanner, then pops.
   Future<void> _exit([String? result]) async {
     if (_exiting) return;
     _exiting = true;
@@ -44,19 +41,57 @@ class _BarcodeScanScreenState extends State<BarcodeScanScreen> {
       setState(() => _scannerMounted = false);
     }
     await WidgetsBinding.instance.endOfFrame;
-    await _releaseCamera();
+    await _releaseCameraFully();
     if (!mounted) return;
     Navigator.of(context).pop(result);
   }
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
   void dispose() {
     _exiting = true;
-    if (_scannerMounted) {
-      unawaited(_releaseCamera());
+    WidgetsBinding.instance.removeObserver(this);
+    if (!_cameraReleased) {
+      unawaited(_releaseCameraFully());
     }
-    unawaited(_controller.dispose());
     super.dispose();
+  }
+
+  @override
+  void deactivate() {
+    super.deactivate();
+    if (!_exiting && !_cameraReleased) {
+      unawaited(pauseMobileScannerIfRunning(_controller));
+    }
+  }
+
+  @override
+  void activate() {
+    super.activate();
+    if (!_exiting && !_cameraReleased && _scannerMounted) {
+      unawaited(resumeMobileScannerIfPaused(_controller));
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_exiting || _cameraReleased) return;
+    switch (state) {
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+      case AppLifecycleState.hidden:
+        unawaited(pauseMobileScannerIfRunning(_controller));
+      case AppLifecycleState.resumed:
+        if (_scannerMounted) {
+          unawaited(resumeMobileScannerIfPaused(_controller));
+        }
+    }
   }
 
   @override
@@ -82,12 +117,12 @@ class _BarcodeScanScreenState extends State<BarcodeScanScreen> {
         body: Stack(
           fit: StackFit.expand,
           children: [
-            if (_scannerMounted)
+            if (_scannerMounted && !_cameraReleased)
               MobileScanner(
                 controller: _controller,
                 useAppLifecycleState: false,
                 onDetect: (BarcodeCapture capture) {
-                  if (_exiting) return;
+                  if (_exiting || _cameraReleased) return;
                   for (final b in capture.barcodes) {
                     final v = b.rawValue;
                     if (v != null && v.trim().isNotEmpty) {

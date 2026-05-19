@@ -396,6 +396,71 @@ class MotherApiServerService {
           return _sendJson(request, 400, {'message': '$e'});
         }
       }
+      if (request.uri.path == '/items/stock-take') {
+        final userId = await _requireApprovedRemoteUserOrRespond(request);
+        if (userId == null) return;
+        if (request.method == 'GET') {
+          final rows =
+              await LocalDbService.instance.getItemsPendingStockHandCount();
+          return _sendJson(request, 200, {
+            'data': await _itemsPayloadWithBarcodes(rows),
+          });
+        }
+        return _sendJson(request, 405, {'message': 'Method not allowed'});
+      }
+      if ((request.method == 'POST' || request.method == 'PUT') &&
+          request.uri.path == '/items/stock-take/stock-qty') {
+        final userId = await _requireApprovedRemoteUserOrRespond(request);
+        if (userId == null) return;
+        final body = await _readBody(request);
+        final itemId = _asInt(body['itemId'] ?? body['item_id']);
+        final stockQty = _asDouble(body['stockQty'] ?? body['stock_qty']);
+        if (itemId == null || itemId <= 0) {
+          return _sendJson(request, 400, {'message': 'Valid itemId is required'});
+        }
+        if (stockQty == null || stockQty < 0) {
+          return _sendJson(request, 400, {
+            'message': 'Valid stockQty is required',
+          });
+        }
+        final updated =
+            await LocalDbService.instance.setItemStockQtyAbsolute(itemId, stockQty);
+        if (updated == 0) {
+          return _sendJson(request, 404, {'message': 'Item not found'});
+        }
+        final rows =
+            await LocalDbService.instance.getItemsPendingStockHandCount();
+        return _sendJson(request, 200, {
+          'message': 'Stock updated',
+          'data': await _itemsPayloadWithBarcodes(rows),
+        });
+      }
+      if ((request.method == 'POST' || request.method == 'PUT') &&
+          request.uri.path == '/items/stock-take/mark-counted') {
+        final userId = await _requireApprovedRemoteUserOrRespond(request);
+        if (userId == null) return;
+        final body = await _readBody(request);
+        final itemId = _asInt(body['itemId'] ?? body['item_id']);
+        if (itemId == null || itemId <= 0) {
+          return _sendJson(request, 400, {'message': 'Valid itemId is required'});
+        }
+        final counted = _parseStockHandCounted(body) ??
+            (body.containsKey('counted') ? body['counted'] == true : null) ??
+            true;
+        final updated = await LocalDbService.instance.setStockHandCounted(
+          itemId,
+          counted,
+        );
+        if (updated == 0) {
+          return _sendJson(request, 404, {'message': 'Item not found'});
+        }
+        final rows =
+            await LocalDbService.instance.getItemsPendingStockHandCount();
+        return _sendJson(request, 200, {
+          'message': counted ? 'Item marked counted' : 'Item marked not counted',
+          'data': await _itemsPayloadWithBarcodes(rows),
+        });
+      }
       if (request.uri.path == '/items') {
         final userId = await _requireApprovedRemoteUserOrRespond(request);
         if (userId == null) return;
@@ -530,6 +595,9 @@ class MotherApiServerService {
             stockQty: stockQtyRaw ?? existingItem?.stockQty ?? 0,
             reorderLevel: reorderLevelRaw ?? existingItem?.reorderLevel ?? 0,
             restockTo: restockToRaw ?? existingItem?.restockTo ?? 0,
+            stockHandCounted: _parseStockHandCounted(body) ??
+                existingItem?.stockHandCounted ??
+                false,
             createdAt: existingItem?.createdAt,
           );
           final id = await LocalDbService.instance.upsertItem(item);
@@ -1738,6 +1806,18 @@ class MotherApiServerService {
               : const <String>[],
         },
     ];
+  }
+
+  bool? _parseStockHandCounted(Map<String, dynamic> body) {
+    final raw = body['stockHandCounted'] ?? body['stock_hand_counted'];
+    if (raw == null) return null;
+    if (raw is bool) return raw;
+    if (raw is int) return raw != 0;
+    if (raw is num) return raw != 0;
+    final s = raw.toString().trim().toLowerCase();
+    if (s == 'true' || s == '1') return true;
+    if (s == 'false' || s == '0') return false;
+    return null;
   }
 
   int? _asInt(Object? value) {

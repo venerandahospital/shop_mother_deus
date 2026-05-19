@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 
 import '../models/item.dart';
+import '../services/auth_service.dart';
+import '../services/local_db_service.dart';
 import '../utils/number_display.dart';
 import '../utils/text_format.dart';
 import '../widgets/section_page_title.dart';
+import 'stock_take_screen.dart';
 
-class ItemDetailsScreen extends StatelessWidget {
+class ItemDetailsScreen extends StatefulWidget {
   const ItemDetailsScreen({
     super.key,
     required this.item,
@@ -14,6 +17,22 @@ class ItemDetailsScreen extends StatelessWidget {
 
   final Item item;
   final String currencySymbol;
+
+  @override
+  State<ItemDetailsScreen> createState() => _ItemDetailsScreenState();
+}
+
+class _ItemDetailsScreenState extends State<ItemDetailsScreen> {
+  final _db = LocalDbService.instance;
+  final _authService = AuthService();
+  late Item _item;
+  bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _item = widget.item;
+  }
 
   String _saleCategoryLabel(String? category) {
     final raw = (category ?? '').trim();
@@ -37,6 +56,77 @@ class ItemDetailsScreen extends StatelessWidget {
       }
     }
     return '';
+  }
+
+  bool get _isServiceItem {
+    final raw = (_item.category ?? '').trim().toLowerCase();
+    return raw.contains('sale: service');
+  }
+
+  Future<void> _markNotCounted() async {
+    if (_item.id == null || _busy) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Mark for re-count?'),
+        content: Text(
+          '${toTitleCaseWords(_item.name)} will appear on Stock take. '
+          'Sales will not check stock until you count and mark it counted again.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Not counted'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    setState(() => _busy = true);
+    if (await _authService.isRemoteUser()) {
+      final remote = await _authService.saveRemoteItem({
+        'id': _item.id,
+        'name': _item.name,
+        'stockHandCounted': false,
+      });
+      if (!remote.$1) {
+        if (mounted) {
+          setState(() => _busy = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(remote.$2)),
+          );
+        }
+        return;
+      }
+    }
+
+    await _db.setStockHandCounted(_item.id!, false);
+    final fresh = await _db.getItemById(_item.id!);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      if (fresh != null) _item = fresh;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('${toTitleCaseWords(_item.name)} marked not counted'),
+        action: SnackBarAction(
+          label: 'Open list',
+          onPressed: () {
+            Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => const StockTakeScreen(),
+              ),
+            );
+          },
+        ),
+      ),
+    );
   }
 
   Widget _detailRow(BuildContext context, String label, String value) {
@@ -72,13 +162,13 @@ class ItemDetailsScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final saleCategory = _saleCategoryLabel(item.category);
-    final businessCategory = _businessCategoryLabel(item.category);
-    final unitLabel = (item.unitShort ?? item.unit ?? '').trim();
+    final saleCategory = _saleCategoryLabel(_item.category);
+    final businessCategory = _businessCategoryLabel(_item.category);
+    final unitLabel = (_item.unitShort ?? _item.unit ?? '').trim();
     final imageUrls = <String>[
-      (item.imageUrl ?? '').trim(),
-      (item.imageUrl2 ?? '').trim(),
-      (item.imageUrl3 ?? '').trim(),
+      (_item.imageUrl ?? '').trim(),
+      (_item.imageUrl2 ?? '').trim(),
+      (_item.imageUrl3 ?? '').trim(),
     ].where((e) => e.isNotEmpty).toList();
 
     return Scaffold(
@@ -114,7 +204,7 @@ class ItemDetailsScreen extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           Text(
-            toTitleCaseWords(item.name),
+            toTitleCaseWords(_item.name),
             style: theme.textTheme.titleLarge?.copyWith(
               fontWeight: FontWeight.w800,
             ),
@@ -128,22 +218,28 @@ class ItemDetailsScreen extends StatelessWidget {
                   _detailRow(
                     context,
                     'Stock',
-                    '${formatDisplayNumber(item.stockQty)} ${unitLabel.isEmpty ? '' : unitLabel}',
+                    '${formatDisplayNumber(_item.stockQty)} ${unitLabel.isEmpty ? '' : unitLabel}',
                   ),
+                  if (!_isServiceItem)
+                    _detailRow(
+                      context,
+                      'Stock at hand',
+                      _item.stockHandCounted ? 'Counted' : 'Not counted',
+                    ),
                   _detailRow(
                     context,
                     'Selling price',
-                    '$currencySymbol${formatMoney(item.sellingPrice)}',
+                    '${widget.currencySymbol}${formatMoney(_item.sellingPrice)}',
                   ),
                   _detailRow(
                     context,
                     'Cost price',
-                    '$currencySymbol${formatMoney(item.costPrice)}',
+                    '${widget.currencySymbol}${formatMoney(_item.costPrice)}',
                   ),
                   _detailRow(
                     context,
                     'Reorder level',
-                    formatDisplayNumber(item.reorderLevel),
+                    formatDisplayNumber(_item.reorderLevel),
                   ),
                   _detailRow(
                     context,
@@ -158,19 +254,33 @@ class ItemDetailsScreen extends StatelessWidget {
                   _detailRow(
                     context,
                     'Barcode',
-                    (item.barcode ?? '').trim().isEmpty
+                    (_item.barcode ?? '').trim().isEmpty
                         ? '-'
-                        : item.barcode!.trim(),
+                        : _item.barcode!.trim(),
                   ),
                   _detailRow(
                     context,
                     'SKU',
-                    (item.sku ?? '').trim().isEmpty ? '-' : item.sku!.trim(),
+                    (_item.sku ?? '').trim().isEmpty ? '-' : _item.sku!.trim(),
                   ),
                 ],
               ),
             ),
           ),
+          if (!_isServiceItem && _item.stockHandCounted) ...[
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: _busy ? null : _markNotCounted,
+              icon: _busy
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.fact_check_outlined),
+              label: const Text('Mark not counted (re-count)'),
+            ),
+          ],
         ],
       ),
     );
